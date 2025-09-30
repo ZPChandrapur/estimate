@@ -2,10 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { SubworkItem, ItemMeasurement, ItemLead, ItemMaterial } from '../types';
-import { 
-  Plus, 
-  Edit2, 
-  Trash2, 
+import {
+  Plus,
+  Edit2,
+  Trash2,
   Calculator,
   Truck,
   Upload,
@@ -20,15 +20,20 @@ interface ItemMeasurementsProps {
   onClose: () => void;
   onItemUpdated?: (itemSrNo: number) => void;
   availableRates: ItemRate[];
+  rateDescriptions: string[];
+  selectedSrNo: number;
 }
 
-const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({ 
-  item, 
-  isOpen, 
+const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
+  item,
+  isOpen,
   onClose,
   onItemUpdated,
-  availableRates
+  availableRates,
+  rateDescriptions,
+  selectedSrNo,
 }) => {
+  console.log("selectedSrNo", selectedSrNo);
   const { user } = useAuth();
   const [activeTab, setActiveTab] = useState<'measurements' | 'leads' | 'materials'>('measurements');
   const [measurements, setMeasurements] = useState<ItemMeasurement[]>([]);
@@ -43,15 +48,16 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
   const [designPhotos, setDesignPhotos] = useState<any[]>([]);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [photoError, setPhotoError] = useState('');
-  const [rateGroups, setRateGroups] = useState<{[key: string]: {rate: number, quantity: number, description?: string}}>({});
+  const [rateGroups, setRateGroups] = useState<{ [key: string]: { rate: number, quantity: number, description?: string } }>({});
   const [currentItem, setCurrentItem] = useState<SubworkItem>(item);
+  const [selectedDescription, setSelectedDescription] = useState<string>('');
   const [newMeasurement, setNewMeasurement] = useState<Partial<ItemMeasurement>>({
     no_of_units: 0,
     length: 0,
     width_breadth: 0,
     height_depth: 0,
     is_manual_quantity: false,
-    selected_rate_id: undefined
+    selected_rate_id: 0
   });
   const [selectedRate, setSelectedRate] = useState<number>(0);
   const [newLead, setNewLead] = useState<Partial<ItemLead>>({
@@ -94,19 +100,19 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
     if (newMeasurement.is_manual_quantity && newMeasurement.manual_quantity !== undefined) {
       return newMeasurement.manual_quantity;
     }
-    
+
     // Otherwise calculate from dimensions
-    return (newMeasurement.no_of_units || 0) * 
-           (newMeasurement.length || 0) * 
-           (newMeasurement.width_breadth || 0) * 
-           (newMeasurement.height_depth || 0);
+    return (newMeasurement.no_of_units || 0) *
+      (newMeasurement.length || 0) *
+      (newMeasurement.width_breadth || 0) *
+      (newMeasurement.height_depth || 0);
   };
 
   const calculateLineAmount = () => {
     const quantity = calculateQuantity();
     const amount = quantity * getSelectedRate();
     return newMeasurement.is_deduction ? -amount : amount;
-    
+
     // Use selected rate or default to item's SSR rate
     let rate = currentItem?.ssr_rate || 0;
     if (newMeasurement.selected_rate_id && itemRates.length > 0) {
@@ -118,12 +124,12 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
   };
 
   const calculateRateGroups = () => {
-    const groups: {[key: string]: {rate: number, quantity: number, description?: string}} = {};
-    
+    const groups: { [key: string]: { rate: number, quantity: number, description?: string } } = {};
+
     measurements.forEach(measurement => {
       const rate = getSelectedRateForMeasurement(measurement);
       const rateKey = rate.toString();
-      
+
       if (!groups[rateKey]) {
         // Find rate description from itemRates
         const rateInfo = itemRates.find(r => r.rate === rate);
@@ -133,17 +139,17 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
           description: rateInfo?.description
         };
       }
-      
+
       groups[rateKey].quantity += measurement.calculated_quantity;
     });
-    
+
     setRateGroups(groups);
   };
 
   const fetchData = async () => {
     try {
       setLoading(true);
-      
+
       if (activeTab === 'measurements') {
         const { data, error } = await supabase
           .schema('estimate')
@@ -193,7 +199,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
         .limit(1);
 
       if (error) throw error;
-      
+
       return data && data.length > 0 ? data[0].measurement_sr_no + 1 : 1;
     } catch (error) {
       console.error('Error getting next measurement sr_no:', error);
@@ -201,56 +207,84 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
     }
   };
 
-  const handleAddMeasurement = async () => {
+ const handleAddMeasurement = async () => {
     if (!user) return;
 
-    if (selectedRate === 0) {
-      alert('Please select a rate');
-      return;
-    }
+    // if (selectedRate === 0) {
+    //   alert('Please select a rate');
+    //   return;
+    // }
 
     try {
       const nextSrNo = await getNextMeasurementSrNo();
-      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
-                                (newMeasurement.length || 0) * 
-                                (newMeasurement.width_breadth || 0) * 
-                                (newMeasurement.height_depth || 0);
-      
+      const calculatedQuantity = (newMeasurement.no_of_units || 0) *
+        (newMeasurement.length || 0) *
+        (newMeasurement.width_breadth || 0) *
+        (newMeasurement.height_depth || 0);
+
       // Use the selected rate
       const rate = selectedRate;
       const lineAmount = calculatedQuantity * rate;
+
+      // 🔹 Fetch subwork_item_id from item_rates using selected_rate_id
+      const { data: rateData, error: rateFetchError } = await supabase
+        .schema('estimate')
+        .from('item_rates')
+        .select('sr_no, subwork_item_sr_no, rate')
+        .eq('description', selectedDescription)   // Now using description instead of sr_no
+        .single();
+
+      if (rateFetchError) throw rateFetchError;
+      const subworkItemId = rateData?.subwork_item_sr_no;
+      const rateSrNo = rateData?.sr_no;
 
       const { error } = await supabase
         .schema('estimate')
         .from('item_measurements')
         .insert([{
           ...newMeasurement,
-          subwork_item_id: currentItem.sr_no,
+          subwork_item_id: subworkItemId,   // 🔹 Corrected
           measurement_sr_no: nextSrNo,
           calculated_quantity: calculatedQuantity,
-          line_amount: lineAmount,
+          line_amount: rateData?.rate *calculatedQuantity,
           unit: newMeasurement.unit || null,
           is_deduction: newMeasurement.is_deduction || false,
           is_manual_quantity: newMeasurement.is_manual_quantity || false,
           manual_quantity: newMeasurement.is_manual_quantity ? (newMeasurement.manual_quantity || 0) : null,
-          selected_rate_id: newMeasurement.selected_rate_id || null
+          selected_rate_id: newMeasurement.selected_rate_id || null,
+          rate_sr_no: rateSrNo
         }]);
 
       if (error) throw error;
-      
+
+      // 🔹 Update ssr_quantity and rate_total_amount in item_rates
+      const fetchedRate = rateData?.rate;
+      const rateTotalAmount = calculatedQuantity * fetchedRate;
+
+      const { error: updateRateError } = await supabase
+        .schema('estimate')
+        .from('item_rates')
+        .update({
+          ssr_quantity: calculatedQuantity,
+          rate_total_amount: rateTotalAmount
+        })
+        .eq('sr_no', rateSrNo);
+
+      if (updateRateError) throw updateRateError;
+
       setShowAddModal(false);
       setNewMeasurement({
         no_of_units: 0,
         length: 0,
         width_breadth: 0,
         height_depth: 0,
-        selected_rate_id: undefined
+        selected_rate_id: 0
       });
       setSelectedRate(0);
-      
+
       // Refresh data first, then update SSR quantity
       fetchData();
-      
+
       // Update SSR quantity after adding measurement
       setTimeout(async () => {
         await updateItemSSRQuantity();
@@ -277,14 +311,14 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
   const updateItemSSRQuantity = async () => {
     try {
       // Get all measurements for this item
-    // Calculate the new total quantity from measurements
-    const newTotalQuantity = measurements.reduce((total, measurement) => {
-      if (measurement.is_deduction) {
-        return total - Math.abs(measurement.calculated_quantity);
-      } else {
-        return total + measurement.calculated_quantity;
-      }
-    }, 0);
+      // Calculate the new total quantity from measurements
+      const newTotalQuantity = measurements.reduce((total, measurement) => {
+        if (measurement.is_deduction) {
+          return total - Math.abs(measurement.calculated_quantity);
+        } else {
+          return total + measurement.calculated_quantity;
+        }
+      }, 0);
 
       const totalQuantity = measurements.reduce((sum, measurement) => {
         if (measurement.is_deduction) {
@@ -296,7 +330,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
 
       // Calculate new total amount
       const newTotalAmount = newTotalQuantity * currentItem.ssr_rate;
-      
+
       const { error: updateError } = await supabase
         .schema('estimate')
         .from('subwork_items')
@@ -307,21 +341,21 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
         .eq('sr_no', currentItem.sr_no);
 
       if (updateError) throw updateError;
-      
+
       // Update the local current item object to reflect changes
       setCurrentItem(prev => ({
         ...prev,
         ssr_quantity: totalQuantity,
         total_item_amount: newTotalAmount
       }));
-      
+
       // Notify parent component to refresh the item data
       if (onItemUpdated) {
         onItemUpdated(currentItem.sr_no);
       }
-      
+
       console.log(`Updated SSR quantity to ${totalQuantity} for item ${currentItem.sr_no}`);
-      
+
     } catch (error) {
       console.error('Error updating SSR quantity:', error);
     }
@@ -348,67 +382,91 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
     setShowEditModal(true);
   };
 
-  const handleUpdateMeasurement = async () => {debugger;
-    if (!selectedMeasurement || !user) return;
+const handleUpdateMeasurement = async () => {
+  if (!selectedMeasurement || !user) return;
 
-    if (selectedRate === 0) {
-      alert('Please select a rate');
-      return;
-    }
+  if (selectedRate === 0) {
+    alert('Please select a rate');
+    return;
+  }
 
-    try {
-      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
-                                (newMeasurement.length || 0) * 
-                                (newMeasurement.width_breadth || 0) * 
-                                (newMeasurement.height_depth || 0);
-      
-      // Use the selected rate
-      const rate = selectedRate;
-      const lineAmount = calculatedQuantity * rate;
+  try {
+    const calculatedQuantity = (newMeasurement.no_of_units || 0) *
+      (newMeasurement.length || 0) *
+      (newMeasurement.width_breadth || 0) *
+      (newMeasurement.height_depth || 0);
 
-      const { error } = await supabase
-        .schema('estimate')
-        .from('item_measurements')
-        .update({
-          description_of_items: newMeasurement.description_of_items,
-          unit: newMeasurement.unit,
-          no_of_units: newMeasurement.no_of_units,
-          length: newMeasurement.length,
-          width_breadth: newMeasurement.width_breadth,
-          height_depth: newMeasurement.height_depth,
-          calculated_quantity: calculateQuantity(),
-          line_amount: calculateLineAmount(),
-          is_manual_quantity: newMeasurement.is_manual_quantity || false,
-          manual_quantity: newMeasurement.manual_quantity || 0,
-          is_deduction: newMeasurement.is_deduction || false,
-          unit: currentItem.ssr_unit
-        })
-        .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
-        .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
+    const rate = selectedRate;
 
-      if (error) throw error;
-      
-      setShowEditModal(false);
-      setSelectedMeasurement(null);
-      setNewMeasurement({
-        no_of_units: 0,
-        length: 0,
-        width_breadth: 0,
-        height_depth: 0
-      });
-      setSelectedRate(0);
-      
-      // Refresh data first, then update SSR quantity
-      fetchData();
-      
-      // Update SSR quantity after editing measurement
-      setTimeout(async () => {
-        await updateItemSSRQuantity();
-      }, 100);
-    } catch (error) {
-      console.error('Error updating measurement:', error);
-    }
-  };
+    // Fetch rate data (remove .single(), use first entry)
+    const { data: rateDataArray, error: rateFetchError } = await supabase
+      .schema('estimate')
+      .from('item_rates')
+      .select('sr_no, rate, subwork_item_sr_no')
+      .eq('subwork_item_sr_no', selectedMeasurement.subwork_item_id);
+    
+    if (rateFetchError) throw rateFetchError;
+    if (!rateDataArray || rateDataArray.length === 0) throw new Error('No rate data found');
+    const rateData = rateDataArray[0];
+
+    const rateSrNo = rateData?.sr_no;
+
+    const { error } = await supabase
+      .schema('estimate')
+      .from('item_measurements')
+      .update({
+        description_of_items: newMeasurement.description_of_items,
+        unit: newMeasurement.unit,
+        no_of_units: newMeasurement.no_of_units,
+        length: newMeasurement.length,
+        width_breadth: newMeasurement.width_breadth,
+        height_depth: newMeasurement.height_depth,
+        calculated_quantity: calculatedQuantity,
+        line_amount: rateData?.rate * calculatedQuantity,
+        is_manual_quantity: newMeasurement.is_manual_quantity || false,
+        manual_quantity: newMeasurement.manual_quantity || 0,
+        is_deduction: newMeasurement.is_deduction || false,
+        rate_sr_no: rateSrNo
+      })
+      .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
+      .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
+
+    if (error) throw error;
+
+    const fetchedRate = rateData?.rate;
+    const rateTotalAmount = calculatedQuantity * fetchedRate;
+
+    const { error: updateRateError } = await supabase
+      .schema('estimate')
+      .from('item_rates')
+      .update({
+        ssr_quantity: calculatedQuantity,
+        rate_total_amount: rateTotalAmount
+      })
+      .eq('sr_no', rateSrNo);
+
+    if (updateRateError) throw updateRateError;
+
+    setShowEditModal(false);
+    setSelectedMeasurement(null);
+    setNewMeasurement({
+      no_of_units: 0,
+      length: 0,
+      width_breadth: 0,
+      height_depth: 0
+    });
+    setSelectedRate(0);
+
+    fetchData();
+
+    setTimeout(async () => {
+      await updateItemSSRQuantity();
+    }, 100);
+  } catch (error) {
+    console.error('Error updating measurement:', error);
+  }
+};
+
 
   const handleDeleteMeasurement = async (measurement: ItemMeasurement) => {
     if (!confirm('Are you sure you want to delete this measurement?')) {
@@ -424,9 +482,9 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
         .eq('measurement_sr_no', measurement.measurement_sr_no);
 
       if (error) throw error;
-      
+
       fetchData();
-      
+
       // Update SSR quantity after deletion
       setTimeout(async () => {
         await updateItemSSRQuantity();
@@ -452,7 +510,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
         }]);
 
       if (error) throw error;
-      
+
       setShowAddModal(false);
       setNewLead({
         material: '',
@@ -482,7 +540,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
         }]);
 
       if (error) throw error;
-      
+
       setShowAddModal(false);
       setNewMaterial({
         material_name: '',
@@ -537,7 +595,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
           </div>
 
           {/* Item Summary */}
-          <div className="bg-blue-50 rounded-lg border border-blue-200 p-4 mb-6">
+          {/* <div className="bg-blue-50 rounded-lg border border-blue-200 p-4 mb-6">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div>
                 <label className="block text-sm font-medium text-blue-900 mb-2">SSR Quantity:</label>
@@ -553,7 +611,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                 ))}
                 <p className="text-xs text-blue-600 mt-1">(Auto-calculated from measurements)</p>
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-blue-900 mb-2">SSR Rate:</label>
                 {Object.entries(rateGroups).map(([rateKey, group]) => (
@@ -565,7 +623,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   </div>
                 ))}
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-blue-900 mb-2">SSR Amount:</label>
                 {Object.entries(rateGroups).map(([rateKey, group]) => (
@@ -579,46 +637,43 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   </div>
                 ))}
               </div>
-              
+
               <div>
                 <span className="text-blue-700 font-medium">Category:</span>
                 <p className="text-blue-900">{currentItem.category || 'N/A'}</p>
               </div>
             </div>
-          </div>
+          </div> */}
 
           {/* Tabs */}
           <div className="border-b border-gray-200 mb-4">
             <nav className="-mb-px flex space-x-8">
               <button
                 onClick={() => setActiveTab('measurements')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'measurements'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'measurements'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
               >
                 <Calculator className="w-4 h-4 inline mr-2" />
                 Measurements ({measurements.length})
               </button>
               <button
                 onClick={() => setActiveTab('leads')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'leads'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'leads'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
               >
                 <Truck className="w-4 h-4 inline mr-2" />
                 Lead Charges ({leads.length})
               </button>
               <button
                 onClick={() => setActiveTab('materials')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'materials'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'materials'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                  }`}
               >
                 <Package2 className="w-4 h-4 inline mr-2" />
                 Materials ({materials.length})
@@ -633,10 +688,11 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-4">
                   <div className="text-sm text-gray-600">
-                    Total Quantity: {totalMeasurementQuantity.toFixed(3)} {currentItem.ssr_unit} | 
-                    Total Amount: {formatCurrency(totalMeasurementAmount)}
+                    Total Quantity: {totalMeasurementQuantity.toFixed(3)} {currentItem.ssr_unit} 
+                    {/* |
+                    Total Amount: {formatCurrency(totalMeasurementAmount)} */}
                   </div>
-                  <button 
+                  <button
                     onClick={() => setShowAddModal(true)}
                     className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-blue-600 hover:bg-blue-700"
                   >
@@ -663,9 +719,9 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                           <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Quantity
                           </th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          {/* <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Amount
-                          </th>
+                          </th> */}
                           <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
                         </tr>
                       </thead>
@@ -695,20 +751,20 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                                 )}
                               </div>
                             </td>
-                            
-                            <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">
+
+                            {/* <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">
                               ₹{measurement.line_amount.toFixed(2)}
-                            </td>
+                            </td> */}
                             <td className="px-3 py-2 whitespace-nowrap text-right text-sm font-medium">
                               <div className="flex items-center space-x-2">
-                                <button 
+                                <button
                                   onClick={() => handleEditMeasurement(measurement)}
                                   className="text-green-600 hover:text-green-900 p-1 rounded"
                                   title="Edit Measurement"
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
-                                <button 
+                                <button
                                   onClick={() => handleDeleteMeasurement(measurement)}
                                   className="text-red-600 hover:text-red-900 p-1 rounded"
                                   title="Delete Measurement"
@@ -739,7 +795,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <div className="text-sm text-gray-600">
                     Total Lead Charges: {formatCurrency(totalLeadCharges)}
                   </div>
-                  <button 
+                  <button
                     onClick={() => setShowAddModal(true)}
                     className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-green-600 hover:bg-green-700"
                   >
@@ -800,7 +856,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <div className="text-sm text-gray-600">
                     Total Material Cost: {formatCurrency(totalMaterialCost)}
                   </div>
-                  <button 
+                  <button
                     onClick={() => setShowAddModal(true)}
                     className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-purple-600 hover:bg-purple-700"
                   >
@@ -882,14 +938,14 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   </button>
                 </div>
               </div>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                   <input
                     type="text"
                     value={newMeasurement.description_of_items || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, description_of_items: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Enter description (optional)"
                   />
@@ -902,7 +958,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <input
                     type="text"
                     value={newMeasurement.unit || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, unit: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Enter unit (sqm, cum, nos, etc.)"
                   />
@@ -913,21 +969,15 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Select Rate
                   </label>
-                  <select
-                    value={selectedRate}
-                    onChange={(e) => {
-                      const rate = parseFloat(e.target.value);
-                      setSelectedRate(rate);
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  >
-                    <option value={0}>Select rate...</option>
-                    {itemRates.map((rate, index) => (
-                      <option key={index} value={rate.rate}>
-                        {rate.description} - ₹{rate.rate} per {rate.unit}
+                  <select value={selectedDescription} onChange={e => setSelectedDescription(e.target.value)}>
+                    <option value="">Select Rate</option>
+                    {rateDescriptions.map((desc, idx) => (
+                      <option key={idx} value={desc}>
+                        {desc}
                       </option>
                     ))}
                   </select>
+
                 </div>
 
                 {/* Dimensions */}
@@ -939,7 +989,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="1"
                       value={newMeasurement.no_of_units || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, no_of_units: parseInt(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -950,7 +1000,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.length || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, length: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -961,7 +1011,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.width_breadth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, width_breadth: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -972,7 +1022,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.height_depth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, height_depth: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -985,7 +1035,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       type="checkbox"
                       checked={newMeasurement.is_manual_quantity || false}
                       onChange={(e) => setNewMeasurement({
-                        ...newMeasurement, 
+                        ...newMeasurement,
                         is_manual_quantity: e.target.checked,
                         manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
                       })}
@@ -1010,7 +1060,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                         step="0.001"
                         value={newMeasurement.manual_quantity || ''}
                         onChange={(e) => setNewMeasurement({
-                          ...newMeasurement, 
+                          ...newMeasurement,
                           manual_quantity: parseFloat(e.target.value) || 0
                         })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
@@ -1026,7 +1076,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       id="edit-deduction"
                       type="checkbox"
                       checked={newMeasurement.is_deduction || false}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, is_deduction: e.target.checked })}
                       className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
                     />
                     <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
@@ -1046,12 +1096,12 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       {newMeasurement.is_deduction ? '-' : ''}{calculateQuantity().toFixed(3)} {newMeasurement.unit || currentItem.ssr_unit}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center text-sm mt-2">
+                  {/* <div className="flex justify-between items-center text-sm mt-2">
                     <span className="text-gray-600">Line Amount:</span>
                     <span className={`font-medium ${newMeasurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
                       {newMeasurement.is_deduction ? '-' : ''}{formatCurrency(Math.abs(calculateLineAmount()))}
                     </span>
-                  </div>
+                  </div> */}
                   <div className="flex items-center justify-between text-xs mt-1 text-gray-500">
                     <span>Rate Used:</span>
                     <span>₹{getSelectedRate().toFixed(2)}</span>
@@ -1089,14 +1139,14 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Material *</label>
                   <input
                     type="text"
                     value={newLead.material || ''}
-                    onChange={(e) => setNewLead({...newLead, material: e.target.value})}
+                    onChange={(e) => setNewLead({ ...newLead, material: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
                     placeholder="Enter material name"
                   />
@@ -1107,7 +1157,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <input
                     type="text"
                     value={newLead.location_of_quarry || ''}
-                    onChange={(e) => setNewLead({...newLead, location_of_quarry: e.target.value})}
+                    onChange={(e) => setNewLead({ ...newLead, location_of_quarry: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
                     placeholder="Enter quarry location"
                   />
@@ -1121,7 +1171,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.1"
                       value={newLead.lead_in_km || ''}
-                      onChange={(e) => setNewLead({...newLead, lead_in_km: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewLead({ ...newLead, lead_in_km: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
                     />
                   </div>
@@ -1132,7 +1182,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newLead.lead_charges || ''}
-                      onChange={(e) => setNewLead({...newLead, lead_charges: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewLead({ ...newLead, lead_charges: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
                     />
                   </div>
@@ -1143,7 +1193,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newLead.initial_lead_charges || ''}
-                      onChange={(e) => setNewLead({...newLead, initial_lead_charges: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewLead({ ...newLead, initial_lead_charges: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
                     />
                   </div>
@@ -1190,14 +1240,14 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Material Name *</label>
                   <input
                     type="text"
                     value={newMaterial.material_name || ''}
-                    onChange={(e) => setNewMaterial({...newMaterial, material_name: e.target.value})}
+                    onChange={(e) => setNewMaterial({ ...newMaterial, material_name: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
                     placeholder="Enter material name"
                   />
@@ -1211,7 +1261,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.001"
                       value={newMaterial.required_quantity || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, required_quantity: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMaterial({ ...newMaterial, required_quantity: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
                     />
                   </div>
@@ -1220,7 +1270,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                     <input
                       type="text"
                       value={newMaterial.unit || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, unit: e.target.value})}
+                      onChange={(e) => setNewMaterial({ ...newMaterial, unit: e.target.value })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
                       placeholder="e.g., kg, ton, nos"
                     />
@@ -1232,7 +1282,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMaterial.rate_per_unit || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, rate_per_unit: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMaterial({ ...newMaterial, rate_per_unit: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
                     />
                   </div>
@@ -1279,7 +1329,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              
+
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1288,7 +1338,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <input
                     type="text"
                     value={newMeasurement.description_of_items || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, description_of_items: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Enter description (optional)"
                   />
@@ -1301,7 +1351,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   <input
                     type="text"
                     value={newMeasurement.unit || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
+                    onChange={(e) => setNewMeasurement({ ...newMeasurement, unit: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Enter unit (e.g., sqm, cum, nos)"
                   />
@@ -1314,20 +1364,21 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                   </label>
                   <select
                     value={selectedRate}
-                    onChange={(e) => {
-                      const rate = parseFloat(e.target.value);
-                      setSelectedRate(rate);
+                    onChange={e => {
+                      const rateIndex = parseInt(e.target.value, 10);
+                      setSelectedRate(rateIndex);
                     }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     required
                   >
-                    <option value={0}>Select rate...</option>
-                    {itemRates.map((rate, index) => (
-                      <option key={index} value={rate.rate}>
-                        {rate.description} - ₹{rate.rate} per {rate.unit}
+                    <option value={0}>Select Rate</option>
+                    {rateDescriptions.map((desc, index) => (
+                      <option key={index + 1} value={index + 1}>
+                        {desc}
                       </option>
                     ))}
                   </select>
+
                 </div>
 
                 {/* Dimensions */}
@@ -1339,7 +1390,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="1"
                       value={newMeasurement.no_of_units || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, no_of_units: parseInt(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -1350,7 +1401,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.length || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, length: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -1361,7 +1412,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.width_breadth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, width_breadth: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -1372,7 +1423,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       min="0"
                       step="0.01"
                       value={newMeasurement.height_depth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, height_depth: parseFloat(e.target.value) || 0 })}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
@@ -1385,7 +1436,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       type="checkbox"
                       checked={newMeasurement.is_manual_quantity || false}
                       onChange={(e) => setNewMeasurement({
-                        ...newMeasurement, 
+                        ...newMeasurement,
                         is_manual_quantity: e.target.checked,
                         manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
                       })}
@@ -1410,7 +1461,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                         step="0.001"
                         value={newMeasurement.manual_quantity || ''}
                         onChange={(e) => setNewMeasurement({
-                          ...newMeasurement, 
+                          ...newMeasurement,
                           manual_quantity: parseFloat(e.target.value) || 0
                         })}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
@@ -1426,7 +1477,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       id="edit-deduction"
                       type="checkbox"
                       checked={newMeasurement.is_deduction || false}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
+                      onChange={(e) => setNewMeasurement({ ...newMeasurement, is_deduction: e.target.checked })}
                       className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
                     />
                     <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
@@ -1445,12 +1496,12 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
                       {calculateQuantity().toFixed(3)} {newMeasurement.unit || item.ssr_unit}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between text-sm">
+                  {/* <div className="flex items-center justify-between text-sm">
                     <span className="text-gray-600">Line Amount:</span>
                     <span className="font-medium text-gray-900">
                       ₹{(calculateQuantity() * getSelectedRate()).toFixed(2)}
                     </span>
-                  </div>
+                  </div> */}
                   <div className="flex items-center justify-between text-xs text-gray-500">
                     <span>Rate Used:</span>
                     <span>
