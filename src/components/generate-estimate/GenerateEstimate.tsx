@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../lib/supabase';
 import { Work, EstimateTemplate, SubWork, SubworkItem, ItemMeasurement, ItemLead, ItemMaterial } from '../types';
-import LoadingSpinner from './common/LoadingSpinner';
-import EstimatePDFGenerator from './EstimatePDFGenerator';
+import LoadingSpinner from '../common/LoadingSpinner';
+import { EstimatePDFGenerator } from './EstimatePDFGenerator';
 import { 
   FileText, 
   Download, 
