@@ -2,17 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { SubworkItem, ItemMeasurement, ItemLead, ItemMaterial } from '../types';
-import { 
-  Plus, 
-  Edit2, 
-  Trash2, 
-  Calculator,
-  Truck,
-  Upload,
-  X,
-  ImageIcon,
-  Package2
-} from 'lucide-react';
+import { Plus, CreditCard as Edit2, Trash2, Calculator, Truck, Upload, X, Image as ImageIcon, Package2 } from 'lucide-react';
 
 interface ItemMeasurementsProps {
   item: SubworkItem;
@@ -1570,7 +1560,7 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
       )}
 
       {/* Edit Measurement Modal */}
-      {showEditModal && selectedMeasurement && selectedMeasurement.sr_no && (
+      {showEditModal && selectedMeasurement && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
           <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
             <div className="mt-3">
