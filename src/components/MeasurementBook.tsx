@@ -1,697 +1,203 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
-import { SubworkItem, ItemMeasurement, ItemLead, ItemMaterial } from '../types';
-import { Plus, CreditCard as Edit2, Trash2, Calculator, Truck, Upload, X, Image as ImageIcon, Package2 } from 'lucide-react';
+import { Work, SubWork, SubworkItem, ItemMeasurement } from '../types';
+import LoadingSpinner from './common/LoadingSpinner';
+import ItemMeasurements from './ItemMeasurements';
+import FullEstimateEditor from './FullEstimateEditor';
+import { 
+  BookOpen, 
+  Search, 
+  Filter,
+  Calculator,
+  FileText,
+  IndianRupee,
+  Building,
+  Edit2,
+  Plus,
+  Ruler,
+  CheckCircle,
+  AlertCircle,
+  Clock
+} from 'lucide-react';
 
-interface ItemMeasurementsProps {
-  item: SubworkItem;
-  isOpen: boolean;
-  onClose: () => void;
-  onItemUpdated?: (itemSrNo: number) => void;
-  availableRates: ItemRate[];
-  existingMeasurements?: ItemMeasurement[];
-  workId?: string; // Add workId to determine context
+interface MeasurementBookData {
+  work: Work;
+  subworks: SubWork[];
+  subworkItems: { [subworkId: string]: SubworkItem[] };
+  measurements: { [itemId: string]: ItemMeasurement[] };
+  totalMeasurementAmount: number;
 }
 
-const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({ 
-  item, 
-  isOpen, 
-  onClose,
-  onItemUpdated,
-  workId,
-  availableRates,
-  existingMeasurements = []
-}) => {
+const MeasurementBook: React.FC = () => {
   const { user } = useAuth();
-  const [itemData, setItemData] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'measurements' | 'leads' | 'materials'>('measurements');
-  const [measurements, setMeasurements] = useState<ItemMeasurement[]>([]);
-  const [itemRates, setItemRates] = useState<ItemRate[]>([]);
-  const [leads, setLeads] = useState<ItemLead[]>([]);
-  const [measurementSources, setMeasurementSources] = useState<{[key: string]: string}>({});
-  const [materials, setMaterials] = useState<ItemMaterial[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [selectedMeasurement, setSelectedMeasurement] = useState<ItemMeasurement | null>(null);
-  const [showPhotosModal, setShowPhotosModal] = useState(false);
-  const [designPhotos, setDesignPhotos] = useState<any[]>([]);
-  const [uploadingPhoto, setUploadingPhoto] = useState(false);
-  const [photoError, setPhotoError] = useState('');
-  const [rateGroups, setRateGroups] = useState<{[key: string]: {rate: number, quantity: number, description?: string}}>({});
-  const [currentItem, setCurrentItem] = useState<SubworkItem>(item);
-  const [newMeasurement, setNewMeasurement] = useState<Partial<ItemMeasurement>>({
-    no_of_units: 0,
-    length: 0,
-    width_breadth: 0,
-    height_depth: 0,
-    is_manual_quantity: false,
-    selected_rate_id: undefined,
-    estimated_quantity: 0,
-    actual_quantity: 0,
-    variance: 0,
-    variance_reason: ''
-  });
-  const [selectedRate, setSelectedRate] = useState<number>(0);
-  const [enableConversion, setEnableConversion] = useState(false);
-  const [conversionFactor, setConversionFactor] = useState<number>(1);
-  const [convertedUnit, setConvertedUnit] = useState<string>('');
-  const [newLead, setNewLead] = useState<Partial<ItemLead>>({
-    material: '',
-    lead_in_km: 0,
-    lead_charges: 0,
-    initial_lead_charges: 0
-  });
-  const [newMaterial, setNewMaterial] = useState<Partial<ItemMaterial>>({
-    material_name: '',
-    required_quantity: 0,
-    rate_per_unit: 0
-  });
-
-  // Get the selected rate for calculations
-  const getSelectedRate = () => {
-    if (newMeasurement.selected_rate_id) {
-      const selectedRate = availableRates.find(rate => rate.sr_no === newMeasurement.selected_rate_id);
-      return selectedRate ? selectedRate.rate : item.ssr_rate;
-    }
-    return item.ssr_rate;
-  };
+  const [works, setWorks] = useState<Work[]>([]);
+  const [selectedWorkId, setSelectedWorkId] = useState<string>('');
+  const [measurementData, setMeasurementData] = useState<MeasurementBookData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [showItemMeasurements, setShowItemMeasurements] = useState(false);
+  const [selectedItemForMeasurement, setSelectedItemForMeasurement] = useState<{
+    itemId: string;
+    itemName: string;
+    subworkId: string;
+    subworkName: string;
+    itemSrNo: number;
+  } | null>(null);
+  const [showFullEstimateEdit, setShowFullEstimateEdit] = useState(false);
+  const [editMode, setEditMode] = useState<'measurements' | 'full_estimate'>('measurements');
+  const [expandedSubworks, setExpandedSubworks] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    if (isOpen && item.sr_no) {
-      // Use existing measurements if provided, otherwise fetch from database
-      if (existingMeasurements.length > 0) {
-        setMeasurements(existingMeasurements);
-      } else {
-        fetchData();
-      }
-      fetchItemRates();
-    }
-  }, [isOpen, item.sr_no, activeTab]);
+    fetchWorks();
+  }, []);
 
   useEffect(() => {
-    setCurrentItem(item);
-  }, [item]);
-
-  useEffect(() => {
-    calculateRateGroups();
-  }, [measurements, itemRates]);
-
-  const fetchItemRates = async () => {
-    try {
-      if (!item?.sr_no) {
-        console.error('Item sr_no is required for fetching rates');
-        return;
-      }
-
-      const { data, error } = await supabase
-        .schema('estimate')
-        .from('item_rates')
-        .select('*')
-        .eq('subwork_item_sr_no', item.sr_no);
-
-      if (error) throw error;
-      setItemData(item);
-
-      // Fetch item rates
-      const { data: rates, error: ratesError } = await supabase
-        .schema('estimate')
-        .from('item_rates')
-        .select('*')
-        .eq('subwork_item_sr_no', item.sr_no);
-
-      if (ratesError) throw ratesError;
-      setItemRates(rates || []);
-    } catch (error) {
-      console.error('Error fetching item rates:', error);
+    if (selectedWorkId) {
+      fetchMeasurementData(selectedWorkId);
     }
-  };
+  }, [selectedWorkId]);
 
-  const calculateQuantity = () => {
-    // If manual quantity is enabled, use the manual quantity value
-    if (newMeasurement.is_manual_quantity && newMeasurement.manual_quantity !== undefined) {
-      const finalQuantity = newMeasurement.is_deduction ? -Math.abs(newMeasurement.manual_quantity) : newMeasurement.manual_quantity;
-      return enableConversion ? finalQuantity * conversionFactor : finalQuantity;
-    }
-    
-    // Otherwise calculate from dimensions
-    const quantity = (newMeasurement.no_of_units || 0) * 
-           (newMeasurement.length || 0) * 
-           (newMeasurement.width_breadth || 0) * 
-           (newMeasurement.height_depth || 0);
-    const finalQuantity = newMeasurement.is_deduction ? -Math.abs(quantity) : quantity;
-    return enableConversion ? finalQuantity * conversionFactor : finalQuantity;
-  };
-
-  const calculateLineAmount = () => {
-    const quantity = calculateQuantity();
-    const amount = quantity * getSelectedRate();
-    return newMeasurement.is_deduction ? -amount : amount;
-    
-    // Use selected rate or default to item's SSR rate
-    let rate = currentItem?.ssr_rate || 0;
-    if (newMeasurement.selected_rate_id && itemRates.length > 0) {
-      const selectedRate = itemRates.find(r => r.sr_no === newMeasurement.selected_rate_id);
-      if (selectedRate) {
-        rate = selectedRate.rate;
-      }
-    }
-  };
-
-  const calculateRateGroups = () => {
-    const groups: {[key: string]: {rate: number, quantity: number, description?: string}} = {};
-    
-    measurements.forEach(measurement => {
-      const rateId = (measurement.selected_rate_id ?? 0).toString();
-      const selectedRate = itemRates.find(r => r.sr_no.toString() === rateId);
-      const rateValue = selectedRate?.rate || item.ssr_rate || 0;
-      
-      if (!groups[rateId]) {
-        groups[rateId] = {
-          rate: rateValue,
-          quantity: 0,
-          description: selectedRate?.description
-        };
-      }
-      
-      groups[rateId].quantity += measurement.calculated_quantity;
-    });
-    
-    setRateGroups(groups);
-  };
-
-  const fetchData = async () => {
+  const fetchWorks = async () => {
     try {
       setLoading(true);
+      const { data, error } = await supabase
+        .schema('estimate')
+        .from('works')
+        .select('*')
+        .order('sr_no', { ascending: false });
+
+      if (error) throw error;
+      setWorks(data || []);
       
-      if (activeTab === 'measurements') {
-        const { data, error } = await supabase
-          .schema('estimate')
-          .from('item_measurements')
-          .select('*')
-          .eq('subwork_item_id', currentItem.sr_no)
-          .order('measurement_sr_no', { ascending: true });
-
-        if (error) throw error;
-        setMeasurements(data || []);
-      } else if (activeTab === 'leads') {
-        const { data, error } = await supabase
-          .schema('estimate')
-          .from('item_leads')
-          .select('*')
-          .eq('subwork_item_id', currentItem.sr_no)
-          .order('sr_no', { ascending: true });
-
-        if (error) throw error;
-        setLeads(data || []);
-      } else if (activeTab === 'materials') {
-        const { data, error } = await supabase
-          .schema('estimate')
-          .from('item_materials')
-          .select('*')
-          .eq('subwork_item_id', currentItem.sr_no)
-          .order('sr_no', { ascending: true });
-
-        if (error) throw error;
-        setMaterials(data || []);
+      if (data && data.length > 0 && !selectedWorkId) {
+        setSelectedWorkId(data[0].works_id);
       }
-      
-      if (workId) {
-        // Measurement Book context: merge data from both tables
-        const [originalRes, modifiedRes] = await Promise.all([
-          supabase
-            .schema('estimate')
-            .from('item_measurements')
-            .select('*')
-            .eq('subwork_item_id', item.sr_no)
-            .order('measurement_sr_no'),
-          supabase
-            .schema('estimate')
-            .from('measurement_book')
-            .select('*')
-            .eq('subwork_item_id', item.sr_no)
-            .eq('work_id', workId)
-            .order('measurement_sr_no')
-        ]);
-
-        if (originalRes.error) throw originalRes.error;
-        if (modifiedRes.error) throw modifiedRes.error;
-
-        // Merge measurements: prioritize measurement_book data
-        const mergedMeasurements = [...(originalRes.data || [])];
-        const sources: {[key: string]: string} = {};
-        
-        // Mark original measurements
-        mergedMeasurements.forEach(measurement => {
-          sources[measurement.measurement_sr_no] = 'item_measurements';
-        });
-
-        // Replace or add measurements from measurement_book
-        (modifiedRes.data || []).forEach(modifiedMeasurement => {
-          const existingIndex = mergedMeasurements.findIndex(
-            original => original.measurement_sr_no === modifiedMeasurement.measurement_sr_no
-          );
-          
-          if (existingIndex >= 0) {
-            // Replace existing measurement with modified version
-            mergedMeasurements[existingIndex] = modifiedMeasurement;
-          } else {
-            // Add new measurement from measurement_book
-            mergedMeasurements.push(modifiedMeasurement);
-          }
-          sources[modifiedMeasurement.measurement_sr_no] = 'measurement_book';
-        });
-
-        setMeasurements(mergedMeasurements);
-        setMeasurementSources(sources);
-      } else {
-        // Subworks context: only from item_measurements
-        const { data, error } = await supabase
-          .schema('estimate')
-          .from('item_measurements')
-          .eq('item_id', item.sr_no)
-          .eq('subwork_id', subworkId)
-          .order('measurement_sr_no');
-
-        if (error) throw error;
-        setMeasurements(data || []);
-        
-        // Mark all as from item_measurements
-        const sources: {[key: string]: string} = {};
-        (data || []).forEach(measurement => {
-          sources[measurement.measurement_sr_no] = 'item_measurements';
-        });
-        setMeasurementSources(sources);
-      }
-    } catch (error: any) {
-      console.error('Error fetching data:', error);
+    } catch (error) {
+      console.error('Error fetching works:', error);
     } finally {
       setLoading(false);
     }
   };
 
-  const getNextMeasurementSrNo = async (): Promise<number> => {
+  const fetchMeasurementData = async (worksId: string) => {
     try {
-      const { data, error } = await supabase
+      setLoading(true);
+
+      const { data: work, error: workError } = await supabase
         .schema('estimate')
-        .from('item_measurements')
-        .select('measurement_sr_no')
-        .eq('subwork_item_id', currentItem.sr_no)
-        .order('measurement_sr_no', { ascending: false })
-        .limit(1);
+        .from('works')
+        .select('*')
+        .eq('works_id', worksId)
+        .single();
 
-      if (error) throw error;
-      
-      return data && data.length > 0 ? data[0].measurement_sr_no + 1 : 1;
-    } catch (error) {
-      console.error('Error getting next measurement sr_no:', error);
-      return 1;
-    }
-  };
+      if (workError || !work) throw workError;
 
-  const handleAddMeasurement = async () => {
-    if (!user) return;
+      const { data: subworks, error: subworksError } = await supabase
+        .schema('estimate')
+        .from('subworks')
+        .select('*')
+        .eq('works_id', worksId)
+        .order('sr_no');
 
-    if (selectedRate === 0) {
-      alert('Please select a rate');
-      return;
-    }
+      if (subworksError) throw subworksError;
 
-    try {
-      const nextSrNo = await getNextMeasurementSrNo();
-      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
-                                (newMeasurement.length || 0) * 
-                                (newMeasurement.width_breadth || 0) * 
-                                (newMeasurement.height_depth || 0);
-      
-      // Use the selected rate
-      const rate = selectedRate;
-      const lineAmount = calculatedQuantity * rate;
-      const variance = calculatedQuantity - (newMeasurement.estimated_quantity || 0);
+      const subworkItems: { [subworkId: string]: SubworkItem[] } = {};
+      const measurements: { [itemId: string]: ItemMeasurement[] } = {};
+      let totalMeasurementAmount = 0;
 
-      const measurementData = {
-        ...newMeasurement,
-        subwork_item_id: currentItem.sr_no,
-        measurement_sr_no: nextSrNo,
-        calculated_quantity: calculatedQuantity,
-        actual_quantity: calculatedQuantity,
-        variance: variance,
-        line_amount: lineAmount,
-        unit: enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || null),
-        is_deduction: newMeasurement.is_deduction || false,
-        is_manual_quantity: newMeasurement.is_manual_quantity || false,
-        manual_quantity: newMeasurement.is_manual_quantity ? (newMeasurement.manual_quantity || 0) : null,
-        selected_rate_id: newMeasurement.selected_rate_id || null
-      };
-
-      // Determine which table to save to based on context
-      if (workId) {
-        // Called from Measurement Book - save to measurement_book table
-        const { error } = await supabase
+      for (const subwork of subworks || []) {
+        const { data: items } = await supabase
           .schema('estimate')
-          .from('measurement_book')
-          .insert([{
-            ...measurementData,
-            work_id: workId,
-          }]);
-        
-        if (error) throw error;
-      } else {
-        // Called from Subworks - save to item_measurements table
-        const { error } = await supabase
-          .schema('estimate')
-          .from('item_measurements')
-          .insert([measurementData]);
-        
-        if (error) throw error;
-      }
-      
-      setShowAddModal(false);
-      setNewMeasurement({
-        no_of_units: 0,
-        length: 0,
-        width_breadth: 0,
-        height_depth: 0,
-        selected_rate_id: undefined,
-        estimated_quantity: 0,
-        actual_quantity: 0,
-        variance: 0,
-        variance_reason: ''
-      });
-      setSelectedRate(0);
-      setEnableConversion(false);
-      setConversionFactor(1);
-      setConvertedUnit('');
-      
-      // Refresh measurements
-      if (existingMeasurements.length > 0) {
-        // If using existing measurements, we need to refresh from parent
-        onClose();
-      } else {
-        fetchData();
-      }
-      
-      // Update SSR quantity after adding measurement
-      setTimeout(async () => {
-        await updateItemSSRQuantity();
-      }, 100);
-    } catch (error) {
-      console.error('Error adding measurement:', error);
-    }
-  };
+          .from('subwork_items')
+          .select('*')
+          .eq('subwork_id', subwork.subworks_id)
+          .order('item_number');
 
-  const copyLastMeasurement = () => {
-    if (measurements.length > 0) {
-      const lastMeasurement = measurements[measurements.length - 1];
-      setNewMeasurement({
-        description_of_items: lastMeasurement.description_of_items,
-        no_of_units: lastMeasurement.no_of_units,
-        is_deduction: lastMeasurement.is_deduction || false,
-        length: lastMeasurement.length,
-        width_breadth: lastMeasurement.width_breadth,
-        height_depth: lastMeasurement.height_depth
-      });
-    }
-  };
+        subworkItems[subwork.subworks_id] = items || [];
 
-  const updateItemSSRQuantity = async () => {
-    try {
-      // Get all measurements for this item
-    // Calculate the new total quantity from measurements
-    const newTotalQuantity = measurements.reduce((total, measurement) => {
-      if (measurement.is_deduction) {
-        return total - Math.abs(measurement.calculated_quantity);
-      } else {
-        return total + measurement.calculated_quantity;
-      }
-    }, 0);
+        for (const item of items || []) {
+          // Fetch original measurements from item_measurements
+          const { data: originalMeasurements } = await supabase
+            .schema('estimate')
+            .from('item_measurements')
+            .select('*')
+            .eq('subwork_item_id', item.sr_no)
+            .order('measurement_sr_no');
 
-      const totalQuantity = measurements.reduce((sum, measurement) => {
-        if (measurement.is_deduction) {
-          return sum - Math.abs(measurement.calculated_quantity);
-        } else {
-          return sum + measurement.calculated_quantity;
+          // Fetch modified measurements from measurement_book
+          const { data: modifiedMeasurements } = await supabase
+            .schema('estimate')
+            .from('measurement_book')
+            .select('*')
+            .eq('subwork_item_id', item.sr_no)
+            .eq('work_id', worksId)
+            .order('measurement_sr_no');
+
+          // Merge measurements: prioritize measurement_book data over item_measurements
+          const mergedMeasurements = [...(originalMeasurements || [])];
+          
+          // Replace or add measurements from measurement_book
+          (modifiedMeasurements || []).forEach(modifiedMeasurement => {
+            const existingIndex = mergedMeasurements.findIndex(
+              original => original.measurement_sr_no === modifiedMeasurement.measurement_sr_no
+            );
+            
+            if (existingIndex >= 0) {
+              // Replace existing measurement with modified version
+              mergedMeasurements[existingIndex] = {
+                ...mergedMeasurements[existingIndex],
+                ...modifiedMeasurement,
+                source: 'measurement_book' // Add source indicator
+              };
+            } else {
+              // Add new measurement from measurement_book
+              mergedMeasurements.push({
+                ...modifiedMeasurement,
+                source: 'measurement_book'
+              });
+            }
+          });
+
+          // Add source indicator to original measurements
+          mergedMeasurements.forEach(measurement => {
+            if (!measurement.source) {
+              measurement.source = 'item_measurements';
+            }
+          });
+
+          measurements[item.id] = mergedMeasurements;
+          
+          const itemMeasurementTotal = (itemMeasurements || []).reduce((sum, m) => sum + (m.calculated_quantity || 0), 0);
+          totalMeasurementAmount += itemMeasurementTotal;
         }
-      }, 0);
-
-      // Calculate new total amount
-      const newTotalAmount = newTotalQuantity * currentItem.ssr_rate;
-      
-      const { error: updateError } = await supabase
-        .schema('estimate')
-        .from('subwork_items')
-        .update({
-          ssr_quantity: totalQuantity,
-          total_item_amount: newTotalAmount
-        })
-        .eq('sr_no', currentItem.sr_no);
-
-      if (updateError) throw updateError;
-      
-      // Update the local current item object to reflect changes
-      setCurrentItem(prev => ({
-        ...prev,
-        ssr_quantity: totalQuantity,
-        total_item_amount: newTotalAmount
-      }));
-      
-      // Notify parent component to refresh the item data
-      if (onItemUpdated) {
-        onItemUpdated(currentItem.sr_no);
       }
-      
-      console.log(`Updated SSR quantity to ${totalQuantity} for item ${currentItem.sr_no}`);
-      
+
+      setMeasurementData({
+        work,
+        subworks: subworks || [],
+        subworkItems,
+        measurements,
+        totalMeasurementAmount
+      });
+
     } catch (error) {
-      console.error('Error updating SSR quantity:', error);
+      console.error('Error fetching measurement data:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleEditMeasurement = (measurement: ItemMeasurement) => {
-    setSelectedMeasurement(measurement);
-    setNewMeasurement({
-      description_of_items: measurement.description_of_items,
-      no_of_units: measurement.no_of_units,
-      length: measurement.length,
-      width_breadth: measurement.width_breadth,
-      height_depth: measurement.height_depth,
-      unit: measurement.unit || '',
-      is_deduction: measurement.is_deduction || false,
-      is_manual_quantity: measurement.is_manual_quantity || false,
-      manual_quantity: measurement.manual_quantity || 0,
-      estimated_quantity: measurement.estimated_quantity || 0,
-      actual_quantity: measurement.actual_quantity || 0,
-      variance: measurement.variance || 0,
-      variance_reason: measurement.variance_reason || ''
+  const handleEditMeasurements = (item: SubworkItem, subwork: SubWork) => {
+    setSelectedItemForMeasurement({
+      itemId: item.sr_no.toString(),
+      itemName: item.description_of_item,
+      subworkId: subwork.subworks_id,
+      subworkName: subwork.subworks_name,
+      itemSrNo: item.sr_no
     });
-    // Set the selected rate based on the measurement's line_amount and calculated_quantity
-    if (measurement.calculated_quantity && measurement.calculated_quantity > 0) {
-      const rate = (measurement.line_amount || 0) / measurement.calculated_quantity;
-      setSelectedRate(rate);
-    }
-    
-    // Check if conversion was used
-    const originalQuantity = measurement.no_of_units * measurement.length * measurement.width_breadth * measurement.height_depth;
-    if (originalQuantity !== 0 && Math.abs(measurement.calculated_quantity / originalQuantity - 1) > 0.001) {
-      setEnableConversion(true);
-      setConversionFactor(Math.abs(measurement.calculated_quantity) / originalQuantity);
-      setConvertedUnit(measurement.unit || newMeasurement.unit);
-    }
-    
-    setShowEditModal(true);
-  };
-
-  const handleUpdateMeasurement = async () => {
-    if (!selectedMeasurement || !user) return;
-
-    if (selectedRate === 0) {
-      alert('Please select a rate');
-      return;
-    }
-
-    try {
-      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
-                                (newMeasurement.length || 0) * 
-                                (newMeasurement.width_breadth || 0) * 
-                                (newMeasurement.height_depth || 0);
-      
-      // Use the selected rate
-      const rate = selectedRate;
-      const lineAmount = calculatedQuantity * rate;
-      const variance = calculatedQuantity - (newMeasurement.estimated_quantity || 0);
-
-      const measurementData = {
-        description_of_items: newMeasurement.description_of_items,
-        unit: enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || currentItem.ssr_unit),
-        no_of_units: newMeasurement.no_of_units,
-        length: newMeasurement.length,
-        width_breadth: newMeasurement.width_breadth,
-        height_depth: newMeasurement.height_depth,
-        calculated_quantity: calculateQuantity(),
-        actual_quantity: calculateQuantity(),
-        variance_reason: newMeasurement.variance_reason,
-        line_amount: calculateLineAmount(),
-        is_manual_quantity: newMeasurement.is_manual_quantity || false,
-        manual_quantity: newMeasurement.manual_quantity || 0,
-      };
-
-      // Determine which table to save to based on context
-      if (workId) {
-        // Called from Measurement Book - save to measurement_book table
-        const { error } = await supabase
-          .schema('estimate')
-          .from('measurement_book')
-          .update(measurementData)
-          .eq('work_id', workId)
-          .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
-          .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
-        
-        if (error) throw error;
-      } else {
-        // Called from Subworks - save to item_measurements table
-        const { error } = await supabase
-          .schema('estimate')
-          .from('item_measurements')
-          .update(measurementData)
-          .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
-          .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
-        
-        if (error) throw error;
-      }
-
-      
-      setShowEditModal(false);
-      setSelectedMeasurement(null);
-      setNewMeasurement({
-        no_of_units: 0,
-        length: 0,
-        width_breadth: 0,
-        height_depth: 0,
-        estimated_quantity: 0,
-        actual_quantity: 0,
-        variance: 0,
-        variance_reason: ''
-      });
-      setSelectedRate(0);
-      setEnableConversion(false);
-      setConversionFactor(1);
-      setConvertedUnit('');
-      
-      // Refresh measurements
-      if (existingMeasurements.length > 0) {
-        // If using existing measurements, we need to refresh from parent
-        onClose();
-      } else {
-        fetchData();
-      }
-      
-      // Update SSR quantity after editing measurement
-      setTimeout(async () => {
-        await updateItemSSRQuantity();
-      }, 100);
-    } catch (error) {
-      console.error('Error updating measurement:', error);
-    }
-  };
-
-  const handleDeleteMeasurement = async (measurement: ItemMeasurement) => {
-    if (!confirm('Are you sure you want to delete this measurement?')) {
-      return;
-    }
-
-    try {
-      const { error } = await supabase
-        .schema('estimate')
-        .from('item_measurements')
-        .delete()
-        .eq('subwork_item_id', measurement.subwork_item_id)
-        .eq('measurement_sr_no', measurement.measurement_sr_no);
-
-      if (error) throw error;
-      
-      // Refresh measurements
-      if (existingMeasurements.length > 0) {
-        // If using existing measurements, we need to refresh from parent
-        onClose();
-      } else {
-        fetchData();
-      }
-      
-      // Update SSR quantity after deletion
-      setTimeout(async () => {
-        await updateItemSSRQuantity();
-      }, 100);
-    } catch (error) {
-      console.error('Error deleting measurement:', error);
-    }
-  };
-
-  const handleAddLead = async () => {
-    if (!newLead.material || !user) return;
-
-    try {
-      const netLeadCharges = (newLead.lead_charges || 0) - (newLead.initial_lead_charges || 0);
-
-      const { error } = await supabase
-        .schema('estimate')
-        .from('item_leads')
-        .insert([{
-          ...newLead,
-          subwork_item_id: currentItem.sr_no,
-          net_lead_charges: netLeadCharges
-        }]);
-
-      if (error) throw error;
-      
-      setShowAddModal(false);
-      setNewLead({
-        material: '',
-        lead_in_km: 0,
-        lead_charges: 0,
-        initial_lead_charges: 0
-      });
-      fetchData();
-    } catch (error) {
-      console.error('Error adding lead:', error);
-    }
-  };
-
-  const handleAddMaterial = async () => {
-    if (!newMaterial.material_name || !user) return;
-
-    try {
-      const totalCost = (newMaterial.required_quantity || 0) * (newMaterial.rate_per_unit || 0);
-
-      const { error } = await supabase
-        .schema('estimate')
-        .from('item_materials')
-        .insert([{
-          ...newMaterial,
-          subwork_item_id: currentItem.sr_no,
-          total_material_cost: totalCost
-        }]);
-
-      if (error) throw error;
-      
-      setShowAddModal(false);
-      setNewMaterial({
-        material_name: '',
-        required_quantity: 0,
-        rate_per_unit: 0
-      });
-      fetchData();
-    } catch (error) {
-      console.error('Error adding material:', error);
-    }
-  };
-
-  const getSelectedRateForMeasurement = (measurement: ItemMeasurement): number => {
-    if (measurement.selected_rate_id) {
-      const selectedRate = availableRates.find(rate => rate.sr_no === measurement.selected_rate_id);
-      return selectedRate ? selectedRate.rate : item.ssr_rate;
-    }
-    return item.ssr_rate;
+    setShowItemMeasurements(true);
   };
 
   const formatCurrency = (amount: number) => {
@@ -701,1234 +207,391 @@ const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({
     }).format(amount);
   };
 
-  const totalMeasurementQuantity = measurements.reduce((sum, m) => sum + m.calculated_quantity, 0);
-  const totalMeasurementAmount = measurements.reduce((sum, m) => sum + m.line_amount, 0);
-  const totalLeadCharges = leads.reduce((sum, l) => sum + l.net_lead_charges, 0);
-  const totalMaterialCost = materials.reduce((sum, m) => sum + m.total_material_cost, 0);
+  const getStatusBadge = (status: string) => {
+    const statusConfig = {
+      draft: { bg: 'bg-gray-100', text: 'text-gray-700', label: 'Draft', icon: FileText },
+      pending: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'Pending', icon: Clock },
+      approved: { bg: 'bg-green-100', text: 'text-green-700', label: 'Approved', icon: CheckCircle },
+      rejected: { bg: 'bg-red-100', text: 'text-red-700', label: 'Rejected', icon: AlertCircle },
+      in_progress: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'In Progress', icon: Calculator },
+      completed: { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Completed', icon: CheckCircle },
+    };
 
-  if (!isOpen) return null;
+    const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.draft;
+    const IconComponent = config.icon;
+
+    return (
+      <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${config.bg} ${config.text}`}>
+        <IconComponent className="w-3 h-3 mr-1" />
+        {config.label}
+      </span>
+    );
+  };
+
+  const toggleSubwork = (subworkId: string) => {
+    setExpandedSubworks(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(subworkId)) {
+        newSet.delete(subworkId);
+      } else {
+        newSet.add(subworkId);
+      }
+      return newSet;
+    });
+  };
+
+  const getMeasurementStatus = (item: SubworkItem) => {
+    const itemMeasurements = measurementData?.measurements[item.sr_no] || [];
+    const measurementCount = itemMeasurements.length;
+    const totalMeasurementAmount = itemMeasurements.reduce((sum, m) => sum + (m.calculated_quantity || 0), 0);
+    
+    if (measurementCount === 0) {
+      return { status: 'no_measurements', count: 0, amount: 0, color: 'text-gray-500', bgColor: 'bg-gray-50' };
+    } else if (totalMeasurementAmount > 0) {
+      return { status: 'measured', count: measurementCount, amount: totalMeasurementAmount, color: 'text-green-600', bgColor: 'bg-green-50' };
+    } else {
+      return { status: 'partial', count: measurementCount, amount: totalMeasurementAmount, color: 'text-yellow-600', bgColor: 'bg-yellow-50' };
+    }
+  };
+
+  const filteredWorks = works.filter(work => {
+    const matchesSearch = work.work_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         (work.works_id && work.works_id.toLowerCase().includes(searchTerm.toLowerCase()));
+    const matchesStatus = statusFilter === 'all' || work.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+
+  if (loading && !measurementData) {
+    return <LoadingSpinner text="Loading measurement book..." />;
+  }
 
   return (
-    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-60">
-      <div className="relative top-5 mx-auto p-5 border w-11/12 max-w-7xl shadow-lg rounded-md bg-white">
-        <div className="mt-3">
-          <div className="flex items-center justify-between mb-4">
+    <div className="min-h-screen bg-gray-50">
+      {/* Enhanced Header */}
+      <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 shadow-xl">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center space-x-4">
+            <div className="p-3 bg-white/20 backdrop-blur-sm rounded-2xl shadow-lg">
+              <BookOpen className="h-8 w-8 text-white" />
+            </div>
             <div>
-              <h3 className="text-lg font-medium text-gray-900">
-                Item {item.item_number} - Detailed Analysis
-              </h3>
-              <p className="text-sm text-gray-500">{item.description_of_item}</p>
+              <h1 className="text-2xl font-bold text-white drop-shadow-lg">
+                Measurement Book (MB)
+              </h1>
+              <p className="text-emerald-100 text-base mt-1 drop-shadow">
+                Record and manage detailed measurements for construction works
+              </p>
             </div>
-            <button
-              onClick={onClose}
-              className="text-gray-400 hover:text-gray-600"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Item Summary */}
-          <div className="bg-blue-50 rounded-lg border border-blue-200 p-4 mb-6">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Quantity:</label>
-                {Object.entries(rateGroups).map(([rateKey, group]) => (
-                  <div key={rateKey} className="mb-2">
-                    <p className="text-sm font-semibold text-blue-800">
-                      {group.quantity.toFixed(3)} {item.ssr_unit}
-                    </p>
-                    {group.description && (
-                      <p className="text-xs text-blue-600">({group.description})</p>
-                    )}
-                  </div>
-                ))}
-                <p className="text-xs text-blue-600 mt-1">(Auto-calculated from measurements)</p>
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Rate:</label>
-                {Object.entries(rateGroups).map(([rateKey, group]) => (
-                  <div key={rateKey} className="mb-2">
-                    <p className="text-sm font-semibold text-blue-800">
-                      ₹{group.rate.toFixed(2)}
-                    </p>
-                    <p className="text-xs text-blue-600">/{item.ssr_unit}</p>
-                  </div>
-                ))}
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Amount:</label>
-                {Object.entries(rateGroups).map(([rateKey, group]) => (
-                  <div key={rateKey} className="mb-2">
-                    <p className="text-sm font-semibold text-green-800">
-                      ₹{(group.quantity * group.rate).toFixed(2)}
-                    </p>
-                    <p className="text-xs text-blue-600">
-                      {group.quantity.toFixed(3)} × ₹{group.rate}
-                    </p>
-                  </div>
-                ))}
-              </div>
-              
-              <div>
-                <span className="text-blue-700 font-medium">Category:</span>
-                <p className="text-blue-900">{currentItem.category || 'N/A'}</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Tabs */}
-          <div className="border-b border-gray-200 mb-4">
-            <nav className="-mb-px flex space-x-8">
-              <button
-                onClick={() => setActiveTab('measurements')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'measurements'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                <Calculator className="w-4 h-4 inline mr-2" />
-                Measurements ({measurements.length})
-              </button>
-              <button
-                onClick={() => setActiveTab('leads')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'leads'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                <Truck className="w-4 h-4 inline mr-2" />
-                Lead Charges ({leads.length})
-              </button>
-              <button
-                onClick={() => setActiveTab('materials')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'materials'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                <Package2 className="w-4 h-4 inline mr-2" />
-                Materials ({materials.length})
-              </button>
-            </nav>
-          </div>
-
-          {/* Tab Content */}
-          <div className="max-h-96 overflow-y-auto">
-            {/* Measurements Tab */}
-            {activeTab === 'measurements' && (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="text-sm text-gray-600">
-                    Total Quantity: {totalMeasurementQuantity.toFixed(3)} {currentItem.ssr_unit} | 
-                    Total Amount: {formatCurrency(totalMeasurementAmount)}
-                  </div>
-                  <button 
-                    onClick={() => setShowAddModal(true)}
-                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-blue-600 hover:bg-blue-700"
-                  >
-                    <Plus className="w-3 h-3 mr-1" />
-                    Add Measurement
-                  </button>
-                </div>
-
-                {loading ? (
-                  <div className="text-center py-8">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-                  </div>
-                ) : measurements.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sr No</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Units</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Length</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Width</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Height</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Quantity
-                          </th>
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Variance
-                          </th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Amount
-                          </th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {measurements.map((measurement) => (
-                          <tr key={measurement.sr_no || measurement.measurement_sr_no} className="hover:bg-gray-50">
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.measurement_sr_no || measurement.sr_no}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.description_of_items || '-'}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.no_of_units}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.length}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.width_breadth}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.height_depth}</td>
-                            <td className="px-4 py-2 whitespace-nowrap text-sm">
-                              <div className="flex flex-col">
-                                <span className={`font-medium ${measurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
-                                  {measurement.is_deduction ? '-' : ''}{measurement.calculated_quantity.toFixed(3)} {measurement.unit || currentItem.ssr_unit}
-                                </span>
-                                {measurement.is_manual_quantity && (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                                    Manual
-                                  </span>
-                                )}
-                                {measurement.is_deduction && (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
-                                    Deduction
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            
-                            <td className="px-4 py-3 text-sm text-center">
-                              <span className={`font-medium ${
-                                (measurement.variance || 0) > 0 ? 'text-red-600' : 
-                                (measurement.variance || 0) < 0 ? 'text-green-600' : 'text-gray-900'
-                              }`}>
-                                {measurement.variance?.toFixed(3) || '0.000'}
-                              </span>
-                            </td>
-                            
-                            <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">
-                              ₹{measurement.line_amount.toFixed(2)}
-                            </td>
-                            <td className="px-3 py-2 whitespace-nowrap text-right text-sm font-medium">
-                              <div className="flex items-center space-x-2">
-                                <button 
-                                  onClick={() => handleEditMeasurement(measurement)}
-                                  className="text-green-600 hover:text-green-900 p-1 rounded"
-                                  title="Edit Measurement"
-                                >
-                                  <Edit2 className="w-4 h-4" />
-                                </button>
-                                <button 
-                                  onClick={() => handleDeleteMeasurement(measurement)}
-                                  className="text-red-600 hover:text-red-900 p-1 rounded"
-                                  title="Delete Measurement"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12">
-                    <Calculator className="mx-auto h-12 w-12 text-gray-300" />
-                    <h3 className="mt-2 text-sm font-medium text-gray-900">No measurements found</h3>
-                    <p className="mt-1 text-sm text-gray-500">Add detailed measurements for this item.</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Lead Charges Tab */}
-            {activeTab === 'leads' && (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="text-sm text-gray-600">
-                    Total Lead Charges: {formatCurrency(totalLeadCharges)}
-                  </div>
-                  <button 
-                    onClick={() => setShowAddModal(true)}
-                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-green-600 hover:bg-green-700"
-                  >
-                    <Plus className="w-3 h-3 mr-1" />
-                    Add Lead
-                  </button>
-                </div>
-
-                {loading ? (
-                  <div className="text-center py-8">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
-                  </div>
-                ) : leads.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sr No</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Quarry Location</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Lead (km)</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Lead Charges</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Initial Charges</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Net Charges</th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {leads.map((lead) => (
-                          <tr key={lead.id} className="hover:bg-gray-50">
-                            <td className="px-3 py-2 text-sm text-gray-900">{lead.sr_no}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{lead.material}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{lead.location_of_quarry || '-'}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{lead.lead_in_km}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">₹{lead.lead_charges.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">₹{lead.initial_lead_charges.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-sm font-medium text-gray-900">
-                              {formatCurrency(lead.net_lead_charges)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12">
-                    <Truck className="mx-auto h-12 w-12 text-gray-300" />
-                    <h3 className="mt-2 text-sm font-medium text-gray-900">No lead charges found</h3>
-                    <p className="mt-1 text-sm text-gray-500">Add lead charges for material transportation.</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Materials Tab */}
-            {activeTab === 'materials' && (
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="text-sm text-gray-600">
-                    Total Material Cost: {formatCurrency(totalMaterialCost)}
-                  </div>
-                  <button 
-                    onClick={() => setShowAddModal(true)}
-                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-purple-600 hover:bg-purple-700"
-                  >
-                    <Plus className="w-3 h-3 mr-1" />
-                    Add Material
-                  </button>
-                </div>
-
-                {loading ? (
-                  <div className="text-center py-8">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600 mx-auto"></div>
-                  </div>
-                ) : materials.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Required Qty</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Unit</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Rate per Unit</th>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Total Cost</th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {materials.map((material) => (
-                          <tr key={material.id} className="hover:bg-gray-50">
-                            <td className="px-3 py-2 text-sm text-gray-900">{material.material_name}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{material.required_quantity}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">{material.unit || '-'}</td>
-                            <td className="px-3 py-2 text-sm text-gray-900">₹{material.rate_per_unit.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-sm font-medium text-gray-900">
-                              {formatCurrency(material.total_material_cost)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="text-center py-12">
-                    <Package2 className="mx-auto h-12 w-12 text-gray-300" />
-                    <h3 className="mt-2 text-sm font-medium text-gray-900">No materials found</h3>
-                    <p className="mt-1 text-sm text-gray-500">Add materials required for this item.</p>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
       </div>
 
-      {/* Add Modals */}
-      {showAddModal && activeTab === 'measurements' && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Add Measurement</h3>
-                <div className="flex items-center space-x-2">
-                  {measurements.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={copyLastMeasurement}
-                      className="inline-flex items-center px-3 py-1.5 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                      title="Copy values from the last measurement"
-                    >
-                      <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      Copy Above
-                    </button>
-                  )}
-                  <button
-                    onClick={() => setShowAddModal(false)}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
+      {/* Controls Section */}
+      <div className="bg-white border-b border-gray-200 px-6 py-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Work Selection */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              <Building className="w-4 h-4 inline mr-1" />
+              Select Work
+            </label>
+            <select
+              value={selectedWorkId}
+              onChange={(e) => setSelectedWorkId(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+            >
+              <option value="">Select Work...</option>
+              {works.map((work) => (
+                <option key={work.works_id} value={work.works_id}>
+                  {work.works_id} - {work.work_name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Search */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              <Search className="w-4 h-4 inline mr-1" />
+              Search Works
+            </label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search works..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+              />
+            </div>
+          </div>
+
+          {/* Status Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              <Filter className="w-4 h-4 inline mr-1" />
+              Status Filter
+            </label>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+            >
+              <option value="all">All Status</option>
+              <option value="draft">Draft</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="in_progress">In Progress</option>
+              <option value="completed">Completed</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Selected Work Info */}
+      {measurementData && (
+        <div className="bg-white border-b border-gray-200 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <FileText className="h-5 w-5 text-blue-600" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900">
+                  {measurementData.work.works_id} - {measurementData.work.work_name}
+                </h3>
+                <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
+                  <span className="flex items-center">
+                    <Building className="w-4 h-4 mr-1" />
+                    {measurementData.work.division || 'N/A'}
+                  </span>
+                  <span className="flex items-center">
+                    <IndianRupee className="w-4 h-4 mr-1" />
+                    Estimate: {formatCurrency(measurementData.work.total_estimated_cost)}
+                  </span>
+                  <span className="flex items-center">
+                    <Ruler className="w-4 h-4 mr-1" />
+                    Measured: {formatCurrency(measurementData.totalMeasurementAmount)}
+                  </span>
                 </div>
               </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                  <input
-                    type="text"
-                    value={newMeasurement.description_of_items || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Enter description (optional)"
-                  />
-                </div>
+            </div>
+            <div>
+              {getStatusBadge(measurementData.work.status)}
+            </div>
+          </div>
+        </div>
+      )}
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Unit
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.unit || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Enter unit (sqm, cum, nos, etc.)"
-                  />
-                </div>
+      {/* Mode Selection */}
+      {measurementData && (
+        <div className="bg-white border-b border-gray-200 px-6 py-4">
+          <div className="flex space-x-4">
+            <button
+              onClick={() => setEditMode('measurements')}
+              className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
+                editMode === 'measurements'
+                  ? 'bg-emerald-600 text-white shadow-md'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-center">
+                <Ruler className="w-5 h-5 mr-2" />
+                Edit Measurements Only
+              </div>
+            </button>
+            <button
+              onClick={() => setEditMode('full_estimate')}
+              className={`flex-1 px-4 py-3 rounded-lg font-medium transition-all ${
+                editMode === 'full_estimate'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-center">
+                <FileText className="w-5 h-5 mr-2" />
+                Estimate Editor
+              </div>
+            </button>
+          </div>
+        </div>
+      )}
 
-                {/* Rate Selection */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Select Rate
-                  </label>
-                  <select
-                    value={selectedRate || ''}
-                    onChange={(e) => {
-                      const selectedValue = e.target.value;
-                      if (selectedValue) {
-                        const rate = parseFloat(selectedValue);
-                        setSelectedRate(rate);
-                      }
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    required
+      {/* Content Area */}
+      <div className="px-6 py-6">
+        {measurementData && editMode === 'measurements' ? (
+          <div className="space-y-6">
+            {measurementData.subworks.map((subwork) => {
+              const items = measurementData.subworkItems[subwork.subworks_id] || [];
+              const isExpanded = expandedSubworks.has(subwork.subworks_id);
+
+              return (
+                <div key={subwork.subworks_id} className="bg-white rounded-lg shadow-sm border border-gray-200">
+                  <div 
+                    className="px-6 py-4 border-b border-gray-200 bg-gray-50 cursor-pointer hover:bg-gray-100 transition-colors"
+                    onClick={() => toggleSubwork(subwork.subworks_id)}
                   >
-                    <option value="">Select rate...</option>
-                    {itemRates.map((rate, index) => (
-                      <option key={index} value={rate.rate}>
-                        {rate.description} - ₹{rate.rate.toFixed(2)} per {rate.unit || itemData.ssr_unit}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Dimensions */}
-                <div className="grid grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">No of Units</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={newMeasurement.no_of_units || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Length</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.length || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Width/Breadth</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.width_breadth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Height/Depth</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.height_depth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center">
-                    <input
-                      id="edit-manual-quantity"
-                      type="checkbox"
-                      checked={newMeasurement.is_manual_quantity || false}
-                      onChange={(e) => setNewMeasurement({
-                        ...newMeasurement, 
-                        is_manual_quantity: e.target.checked,
-                        manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
-                      })}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <label htmlFor="edit-manual-quantity" className="ml-2 block text-sm text-gray-900">
-                      Enter quantity manually (don't calculate from L×B×H)
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-500 ml-6">
-                    Check this if you want to enter a specific quantity instead of calculating from dimensions
-                  </p>
-
-                  {newMeasurement.is_manual_quantity && (
-                    <div className="ml-6">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Manual Quantity
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={newMeasurement.manual_quantity || ''}
-                        onChange={(e) => setNewMeasurement({
-                          ...newMeasurement, 
-                          manual_quantity: parseFloat(e.target.value) || 0
-                        })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                        placeholder="Enter manual quantity"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Unit Conversion */}
-                <div className="flex items-start space-x-3">
-                  <input
-                    type="checkbox"
-                    id="enableConversion"
-                    checked={enableConversion}
-                    onChange={(e) => setEnableConversion(e.target.checked)}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <label htmlFor="enableConversion" className="text-sm font-medium text-gray-700">
-                      Convert calculated quantity
-                    </label>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Check this to convert the calculated quantity to different units (e.g., kg to metric ton)
-                    </p>
-                    
-                    {enableConversion && (
-                      <div className="mt-3 grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Conversion Factor
-                          </label>
-                          <input
-                            type="number"
-                            step="0.001"
-                            value={conversionFactor}
-                            onChange={(e) => setConversionFactor(parseFloat(e.target.value) || 1)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            placeholder="1.0"
-                          />
-                          <p className="text-xs text-gray-400 mt-1">
-                            e.g., 0.001 for kg to metric ton
-                          </p>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Converted Unit
-                          </label>
-                          <input
-                            type="text"
-                            value={convertedUnit}
-                            onChange={(e) => setConvertedUnit(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            placeholder="metric ton"
-                          />
-                        </div>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="font-semibold text-gray-900">
+                          {subwork.subworks_id} - {subwork.subworks_name}
+                        </h3>
+                        <p className="text-sm text-gray-600 mt-1">{items.length} items</p>
                       </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center">
-                    <input
-                      id="edit-deduction"
-                      type="checkbox"
-                      checked={newMeasurement.is_deduction || false}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
-                      className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
-                    />
-                    <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
-                      This is a deduction (subtract from total)
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-500 ml-6">
-                    Check this for openings, voids, or other items that should be subtracted from the total quantity
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Estimated Quantity
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    value={newMeasurement.estimated_quantity}
-                    onChange={(e) => setNewMeasurement({
-                      ...newMeasurement, 
-                      estimated_quantity: parseFloat(e.target.value) || 0
-                    })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Variance Reason (if any)
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.variance_reason}
-                    onChange={(e) => setNewMeasurement({
-                      ...newMeasurement, 
-                      variance_reason: e.target.value
-                    })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Reason for variance (optional)"
-                  />
-                </div>
-
-                {/* Preview */}
-                <div className="bg-gray-50 p-4 rounded-md">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-600">Calculated Quantity:</span>
-                    <span className={`font-medium ${newMeasurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
-                      {newMeasurement.is_deduction ? '-' : ''}{calculateQuantity().toFixed(3)} {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || currentItem.ssr_unit)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center text-sm mt-2">
-                    <span className="text-gray-600">Line Amount:</span>
-                    <span className={`font-medium ${newMeasurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
-                      {newMeasurement.is_deduction ? '-' : ''}{formatCurrency(Math.abs(calculateLineAmount()))}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-xs mt-1 text-gray-500">
-                    <span>Rate Used:</span>
-                    <span>₹{getSelectedRate().toFixed(2)}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddMeasurement}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
-                >
-                  Add Measurement
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Lead Modal */}
-      {showAddModal && activeTab === 'leads' && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Add Lead Charges</h3>
-                <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Material *</label>
-                  <input
-                    type="text"
-                    value={newLead.material || ''}
-                    onChange={(e) => setNewLead({...newLead, material: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
-                    placeholder="Enter material name"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Location of Quarry</label>
-                  <input
-                    type="text"
-                    value={newLead.location_of_quarry || ''}
-                    onChange={(e) => setNewLead({...newLead, location_of_quarry: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
-                    placeholder="Enter quarry location"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Lead (km)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.1"
-                      value={newLead.lead_in_km || ''}
-                      onChange={(e) => setNewLead({...newLead, lead_in_km: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Lead Charges (₹)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newLead.lead_charges || ''}
-                      onChange={(e) => setNewLead({...newLead, lead_charges: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Initial Charges (₹)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newLead.initial_lead_charges || ''}
-                      onChange={(e) => setNewLead({...newLead, initial_lead_charges: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="bg-gray-50 p-3 rounded-md">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-600">Net Lead Charges:</span>
-                    <span className="font-medium text-gray-900">
-                      ₹{((newLead.lead_charges || 0) - (newLead.initial_lead_charges || 0)).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddLead}
-                  disabled={!newLead.material}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
-                >
-                  Add Lead
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Material Modal */}
-      {showAddModal && activeTab === 'materials' && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Add Material</h3>
-                <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Material Name *</label>
-                  <input
-                    type="text"
-                    value={newMaterial.material_name || ''}
-                    onChange={(e) => setNewMaterial({...newMaterial, material_name: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
-                    placeholder="Enter material name"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Required Quantity</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.001"
-                      value={newMaterial.required_quantity || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, required_quantity: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
-                    <input
-                      type="text"
-                      value={newMaterial.unit || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, unit: e.target.value})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
-                      placeholder="e.g., kg, ton, nos"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Rate per Unit (₹)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMaterial.rate_per_unit || ''}
-                      onChange={(e) => setNewMaterial({...newMaterial, rate_per_unit: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="bg-gray-50 p-3 rounded-md">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-600">Total Material Cost:</span>
-                    <span className="font-medium text-gray-900">
-                      ₹{((newMaterial.required_quantity || 0) * (newMaterial.rate_per_unit || 0)).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddMaterial}
-                  disabled={!newMaterial.material_name}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50"
-                >
-                  Add Material
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Edit Measurement Modal */}
-      {showEditModal && selectedMeasurement && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Edit Measurement</h3>
-                <button onClick={() => setShowEditModal(false)} className="text-gray-400 hover:text-gray-600">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Description
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.description_of_items || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Enter description (optional)"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Unit
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.unit || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Enter unit (e.g., sqm, cum, nos)"
-                  />
-                </div>
-
-                {/* Rate Selection */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Select Rate *
-                  </label>
-                  <select
-                    value={selectedRate || ''}
-                    onChange={(e) => {
-                      const selectedValue = e.target.value;
-                      if (selectedValue) {
-                        const rate = parseFloat(selectedValue);
-                        setSelectedRate(rate);
-                      }
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    required
-                  >
-                    <option value="">Select rate...</option>
-                    {itemRates.map((rate, index) => (
-                      <option key={index} value={rate.rate}>
-                        {rate.description} - ₹{rate.rate.toFixed(2)} per {rate.unit || itemData.ssr_unit}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Dimensions */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">No of Units</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={newMeasurement.no_of_units || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Length</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.length || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Width/Breadth</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.width_breadth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Height/Depth</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={newMeasurement.height_depth || ''}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center">
-                    <input
-                      id="edit-manual-quantity"
-                      type="checkbox"
-                      checked={newMeasurement.is_manual_quantity || false}
-                      onChange={(e) => setNewMeasurement({
-                        ...newMeasurement, 
-                        is_manual_quantity: e.target.checked,
-                        manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
-                      })}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <label htmlFor="edit-manual-quantity" className="ml-2 block text-sm text-gray-900">
-                      Enter quantity manually (don't calculate from L×B×H)
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-500 ml-6">
-                    Check this if you want to enter a specific quantity instead of calculating from dimensions
-                  </p>
-
-                  {newMeasurement.is_manual_quantity && (
-                    <div className="ml-6">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Manual Quantity
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={newMeasurement.manual_quantity || ''}
-                        onChange={(e) => setNewMeasurement({
-                          ...newMeasurement, 
-                          manual_quantity: parseFloat(e.target.value) || 0
-                        })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                        placeholder="Enter manual quantity"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* Unit Conversion */}
-                <div className="flex items-start space-x-3">
-                  <input
-                    type="checkbox"
-                    id="enableConversion"
-                    checked={enableConversion}
-                    onChange={(e) => setEnableConversion(e.target.checked)}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <label htmlFor="enableConversion" className="text-sm font-medium text-gray-700">
-                      Convert calculated quantity
-                    </label>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Check this to convert the calculated quantity to different units (e.g., kg to metric ton)
-                    </p>
-                    
-                    {enableConversion && (
-                      <div className="mt-3 grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Conversion Factor
-                          </label>
-                          <input
-                            type="number"
-                            step="0.001"
-                            value={conversionFactor}
-                            onChange={(e) => setConversionFactor(parseFloat(e.target.value) || 1)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            placeholder="1.0"
-                          />
-                          <p className="text-xs text-gray-400 mt-1">
-                            e.g., 0.001 for kg to metric ton
-                          </p>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Converted Unit
-                          </label>
-                          <input
-                            type="text"
-                            value={convertedUnit}
-                            onChange={(e) => setConvertedUnit(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                            placeholder="metric ton"
-                          />
-                        </div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-sm text-gray-500">
+                          {isExpanded ? 'Click to collapse' : 'Click to expand'}
+                        </span>
+                        <svg 
+                          className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                          fill="none" 
+                          stroke="currentColor" 
+                          viewBox="0 0 24 24"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
                       </div>
-                    )}
+                    </div>
                   </div>
-                </div>
 
-                <div className="space-y-2">
-                  <div className="flex items-center">
-                    <input
-                      id="edit-deduction"
-                      type="checkbox"
-                      checked={newMeasurement.is_deduction || false}
-                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
-                      className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
-                    />
-                    <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
-                      This is a deduction (subtract from total)
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-500 ml-6">
-                    Check this for openings, voids, or other items that should be subtracted from the total quantity
-                  </p>
+                  {isExpanded && items.length > 0 ? (
+                    <div className="divide-y divide-gray-200">
+                      {items.map((item) => {
+                        const measurementStatus = getMeasurementStatus(item);
+                        
+                        return (
+                          <div key={item.id} className="px-6 py-4 hover:bg-gray-50">
+                            <div className="flex items-center justify-between">
+                              <div className="flex-1">
+                                <div className="flex items-center space-x-3 mb-2">
+                                  <span className="text-sm font-medium text-gray-500">#{item.item_number}</span>
+                                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${measurementStatus.bgColor} ${measurementStatus.color}`}>
+                                    {measurementStatus.count} measurements
+                                  </span>
+                                </div>
+                                
+                                <h4 className="font-medium text-gray-900 mb-2">
+                                  {item.description_of_item}
+                                </h4>
+                                
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm text-gray-600">
+                                  <div>
+                                    <span className="font-medium">Quantity:</span> {item.ssr_quantity} {item.ssr_unit}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium">Rate:</span> {formatCurrency(item.ssr_rate || 0)}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium">Estimate:</span> {formatCurrency(item.total_item_amount || 0)}
+                                  </div>
+                                  <div>
+                                    <span className="font-medium">Measured:</span> {formatCurrency(measurementStatus.amount)}
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="ml-6">
+                                <button
+                                  onClick={() => handleEditMeasurements(item, subwork)}
+                                  className={`inline-flex items-center px-4 py-2 rounded-lg transition-colors ${
+                                    measurementStatus.count > 0 
+                                      ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                                  }`}
+                                >
+                                  <Edit2 className="w-4 h-4 mr-2" />
+                                  {measurementStatus.count > 0 ? `Edit Measurements (${measurementStatus.count})` : 'Add Measurements'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : isExpanded && items.length === 0 ? (
+                    <div className="px-6 py-8 text-center text-gray-500">
+                      <Calculator className="mx-auto h-8 w-8 mb-2" />
+                      <p>No items found in this subwork</p>
+                    </div>
+                  ) : null}
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Estimated Quantity
-                  </label>
-                  <input
-                    type="number"
-                    step="0.001"
-                    value={newMeasurement.estimated_quantity}
-                    onChange={(e) => setNewMeasurement({
-                      ...newMeasurement, 
-                      estimated_quantity: parseFloat(e.target.value) || 0
-                    })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  />
+              );
+            })}
+          </div>
+        ) : selectedWorkId && editMode === 'full_estimate' ? (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-blue-100 rounded-lg">
+                  <FileText className="h-5 w-5 text-blue-600" />
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Variance Reason (if any)
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.variance_reason}
-                    onChange={(e) => setNewMeasurement({
-                      ...newMeasurement, 
-                      variance_reason: e.target.value
-                    })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Reason for variance (optional)"
-                  />
-                </div>
-
-                <div className="bg-gray-50 p-3 rounded-md">
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-600">Calculated Quantity:</span>
-                    <span className="font-medium text-gray-900">
-                      {calculateQuantity().toFixed(3)} {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || item.ssr_unit)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-600">Line Amount:</span>
-                    <span className="font-medium text-gray-900">
-                      ₹{(calculateQuantity() * getSelectedRate()).toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-gray-500">
-                    <span>Rate Used:</span>
-                    <span>
-                      ₹{getSelectedRate().toFixed(2)} per {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || item.ssr_unit)}
-                    </span>
-                  </div>
-                </div>
+                <h3 className="text-lg font-semibold text-gray-900">Full Estimate Editor</h3>
               </div>
-
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => setShowEditModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleUpdateMeasurement}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
-                >
-                  Update Measurement
-                </button>
-              </div>
+              <button
+                onClick={() => setShowFullEstimateEdit(true)}
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                <Edit2 className="w-4 h-4 mr-2" />
+                Open Excel-like Editor
+              </button>
+            </div>
+            
+            <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+              <p className="text-blue-800 text-sm">
+                <strong>Full Estimate Editor:</strong> Edit the complete estimate in an Excel-like interface. 
+                All changes will be saved as a draft version.
+              </p>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12 text-center">
+            <BookOpen className="mx-auto h-12 w-12 text-gray-300 mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">Select a work to begin</h3>
+            <p className="text-gray-500">Choose a work from the dropdown above to start recording measurements.</p>
+          </div>
+        )}
+      </div>
+
+      {/* Full Estimate Editor Modal */}
+      {showFullEstimateEdit && selectedWorkId && (
+        <FullEstimateEditor
+          workId={selectedWorkId}
+          isOpen={showFullEstimateEdit}
+          onClose={() => setShowFullEstimateEdit(false)}
+          onSave={() => {
+            if (selectedWorkId) {
+              fetchMeasurementData(selectedWorkId);
+            }
+          }}
+        />
       )}
 
-      {/* Design Photos Modal */}
-      {showPhotosModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Design Photos</h3>
-                <button
-                  onClick={() => {
-                    setShowPhotosModal(false);
-                    setPhotoError('');
-                  }}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {photoError && (
-                <div className="mb-4 bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-md text-sm">
-                  {photoError}
-                </div>
-              )}
-
-              {/* Upload Section */}
-              <div className="mb-6 p-4 border-2 border-dashed border-gray-300 rounded-lg">
-                <div className="text-center">
-                  <Upload className="mx-auto h-12 w-12 text-gray-400" />
-                  <div className="mt-4">
-                    <label htmlFor="photo-upload" className="cursor-pointer">
-                      <span className="mt-2 block text-sm font-medium text-gray-900">
-                        Upload Design Photos
-                      </span>
-                      <span className="mt-1 block text-xs text-gray-500">
-                        PNG, JPG, GIF up to 5MB each. Maximum 5 photos.
-                      </span>
-                    </label>
-                    <input
-                      id="photo-upload"
-                      type="file"
-                      multiple
-                      accept="image/*"
-                      onChange={handlePhotoUpload}
-                      disabled={uploadingPhoto || designPhotos.length >= 5}
-                      className="hidden"
-                    />
-                    <button
-                      onClick={() => document.getElementById('photo-upload')?.click()}
-                      disabled={uploadingPhoto || designPhotos.length >= 5}
-                      className="mt-3 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {uploadingPhoto ? (
-                        <>
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                          Uploading...
-                        </>
-                      ) : (
-                        <>
-                          <Upload className="w-4 h-4 mr-2" />
-                          Choose Photos
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      {/* Item Measurements Modal */}
+      {showItemMeasurements && selectedItemForMeasurement && (
+        <ItemMeasurements
+          item={{
+            id: selectedItemForMeasurement.itemSrNo.toString(),
+            sr_no: selectedItemForMeasurement.itemSrNo,
+            description_of_item: selectedItemForMeasurement.itemName,
+            subwork_id: selectedItemForMeasurement.subworkId
+          }}
+          itemName={selectedItemForMeasurement.itemName}
+          subworkId={selectedItemForMeasurement.subworkId}
+          subworkName={selectedItemForMeasurement.subworkName}
+          workId={selectedWorkId} // Pass workId to indicate Measurement Book context
+          isOpen={showItemMeasurements}
+          onClose={() => {
+            setShowItemMeasurements(false);
+            setSelectedItemForMeasurement(null);
+            if (selectedWorkId) {
+              fetchMeasurementData(selectedWorkId);
+            }
+          }}
+        />
       )}
     </div>
   );
 };
 
-export default ItemMeasurements;
+export default MeasurementBook;
