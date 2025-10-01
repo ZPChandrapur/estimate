@@ -43,7 +43,7 @@ const MeasurementBook: React.FC = () => {
     itemName: string;
     subworkId: string;
     subworkName: string;
-    itemSrNo: number;
+    existingMeasurements: ItemMeasurement[];
   } | null>(null);
   const [showFullEstimateEdit, setShowFullEstimateEdit] = useState(false);
   const [editMode, setEditMode] = useState<'measurements' | 'full_estimate'>('measurements');
@@ -118,58 +118,16 @@ const MeasurementBook: React.FC = () => {
         subworkItems[subwork.subworks_id] = items || [];
 
         for (const item of items || []) {
-          // Fetch original measurements from item_measurements
-          const { data: originalMeasurements } = await supabase
+          const { data: itemMeasurements } = await supabase
             .schema('estimate')
             .from('item_measurements')
             .select('*')
             .eq('subwork_item_id', item.sr_no)
             .order('measurement_sr_no');
 
-          // Fetch modified measurements from measurement_book
-          const { data: modifiedMeasurements } = await supabase
-            .schema('estimate')
-            .from('measurement_book')
-            .select('*')
-            .eq('subwork_item_id', item.sr_no)
-            .eq('work_id', worksId)
-            .order('measurement_sr_no');
-
-          // Merge measurements: prioritize measurement_book data over item_measurements
-          const mergedMeasurements = [...(originalMeasurements || [])];
+          measurements[item.sr_no] = itemMeasurements || [];
           
-          // Replace or add measurements from measurement_book
-          (modifiedMeasurements || []).forEach(modifiedMeasurement => {
-            const existingIndex = mergedMeasurements.findIndex(
-              original => original.measurement_sr_no === modifiedMeasurement.measurement_sr_no
-            );
-            
-            if (existingIndex >= 0) {
-              // Replace existing measurement with modified version
-              mergedMeasurements[existingIndex] = {
-                ...mergedMeasurements[existingIndex],
-                ...modifiedMeasurement,
-                source: 'measurement_book' // Add source indicator
-              };
-            } else {
-              // Add new measurement from measurement_book
-              mergedMeasurements.push({
-                ...modifiedMeasurement,
-                source: 'measurement_book'
-              });
-            }
-          });
-
-          // Add source indicator to original measurements
-          mergedMeasurements.forEach(measurement => {
-            if (!measurement.source) {
-              measurement.source = 'item_measurements';
-            }
-          });
-
-          measurements[item.id] = mergedMeasurements;
-          
-          const itemMeasurementTotal = (itemMeasurements || []).reduce((sum, m) => sum + (m.calculated_quantity || 0), 0);
+          const itemMeasurementTotal = (itemMeasurements || []).reduce((sum, m) => sum + (m.actual_quantity || 0), 0);
           totalMeasurementAmount += itemMeasurementTotal;
         }
       }
@@ -189,13 +147,14 @@ const MeasurementBook: React.FC = () => {
     }
   };
 
-  const handleEditMeasurements = (item: SubworkItem, subwork: SubWork) => {
+  const handleAddMeasurement = (item: SubworkItem, subwork: SubWork) => {
+    const existingMeasurements = measurementData?.measurements[item.sr_no] || [];
     setSelectedItemForMeasurement({
       itemId: item.sr_no.toString(),
       itemName: item.description_of_item,
       subworkId: subwork.subworks_id,
       subworkName: subwork.subworks_name,
-      itemSrNo: item.sr_no
+      existingMeasurements: existingMeasurements
     });
     setShowItemMeasurements(true);
   };
@@ -241,9 +200,9 @@ const MeasurementBook: React.FC = () => {
   };
 
   const getMeasurementStatus = (item: SubworkItem) => {
-    const itemMeasurements = measurementData?.measurements[item.sr_no] || [];
+    const itemMeasurements = measurementData?.measurements[item.id] || [];
     const measurementCount = itemMeasurements.length;
-    const totalMeasurementAmount = itemMeasurements.reduce((sum, m) => sum + (m.calculated_quantity || 0), 0);
+    const totalMeasurementAmount = itemMeasurements.reduce((sum, m) => sum + (m.line_amount || 0), 0);
     
     if (measurementCount === 0) {
       return { status: 'no_measurements', count: 0, amount: 0, color: 'text-gray-500', bgColor: 'bg-gray-50' };
@@ -493,15 +452,15 @@ const MeasurementBook: React.FC = () => {
                               
                               <div className="ml-6">
                                 <button
-                                  onClick={() => handleEditMeasurements(item, subwork)}
+                                  onClick={() => handleAddMeasurement(item, subwork)}
                                   className={`inline-flex items-center px-4 py-2 rounded-lg transition-colors ${
                                     measurementStatus.count > 0 
-                                      ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                                      ? 'bg-blue-600 hover:bg-blue-700 text-white' 
                                       : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                                   }`}
                                 >
                                   <Edit2 className="w-4 h-4 mr-2" />
-                                  {measurementStatus.count > 0 ? `Edit Measurements (${measurementStatus.count})` : 'Add Measurements'}
+                                  {measurementStatus.count > 0 ? 'Edit Measurements' : 'Add Measurements'}
                                 </button>
                               </div>
                             </div>
@@ -570,16 +529,10 @@ const MeasurementBook: React.FC = () => {
       {/* Item Measurements Modal */}
       {showItemMeasurements && selectedItemForMeasurement && (
         <ItemMeasurements
-          item={{
-            id: selectedItemForMeasurement.itemSrNo.toString(),
-            sr_no: selectedItemForMeasurement.itemSrNo,
-            description_of_item: selectedItemForMeasurement.itemName,
-            subwork_id: selectedItemForMeasurement.subworkId
-          }}
+          itemId={selectedItemForMeasurement.itemId}
           itemName={selectedItemForMeasurement.itemName}
           subworkId={selectedItemForMeasurement.subworkId}
           subworkName={selectedItemForMeasurement.subworkName}
-          workId={selectedWorkId} // Pass workId to indicate Measurement Book context
           isOpen={showItemMeasurements}
           onClose={() => {
             setShowItemMeasurements(false);
