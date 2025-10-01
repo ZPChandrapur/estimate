@@ -1,992 +1,1944 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { useLanguage } from '../contexts/LanguageContext';
 import { supabase } from '../lib/supabase';
-import { Work, SubWork, SubworkItem } from '../types';
-import LoadingSpinner from './common/LoadingSpinner';
-import { BookOpen, Search, Filter, Plus, Save, Download, Calculator, Ruler, CreditCard as Edit2, Trash2, Eye, RefreshCw, AlertTriangle, CheckCircle, FileSpreadsheet, Import, Upload } from 'lucide-react';
+import { SubworkItem, ItemMeasurement, ItemLead, ItemMaterial } from '../types';
+import { 
+  Plus, 
+  Edit2, 
+  Trash2, 
+  Calculator,
+  Truck,
+  Upload,
+  X,
+  ImageIcon,
+  Package2
+} from 'lucide-react';
 
-interface MeasurementBookEntry {
-  sr_no: number;
-  work_id: string;
-  subwork_id: string;
-  item_id: string;
-  measurement_sr_no: number;
-  description_of_items: string;
-  no_of_units: number;
-  length: number;
-  width_breadth: number;
-  height_depth: number;
-  estimated_quantity: number;
-  actual_quantity: number;
-  variance: number;
-  variance_reason: string;
-  unit: string;
-  measured_by: string;
-  measured_at: string;
-  created_at: string;
-  updated_at: string;
+interface ItemMeasurementsProps {
+  item: SubworkItem;
+  isOpen: boolean;
+  onClose: () => void;
+  onItemUpdated?: (itemSrNo: number) => void;
+  availableRates: ItemRate[];
+  existingMeasurements?: ItemMeasurement[];
+  workId?: string; // Add workId to determine context
 }
 
-interface EstimateData {
-  work: Work;
-  subworks: SubWork[];
-  subworkItems: { [subworkId: string]: SubworkItem[] };
-}
+const ItemMeasurements: React.FC<ItemMeasurementsProps> = ({ 
+  item, 
+  isOpen, 
+  onClose,
+  onItemUpdated,
+  workId,
+  availableRates,
+  existingMeasurements = []
+}) => {
+  const { user } = useAuth();
+  const [itemData, setItemData] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<'measurements' | 'leads' | 'materials'>('measurements');
+  const [measurements, setMeasurements] = useState<ItemMeasurement[]>([]);
+  const [itemRates, setItemRates] = useState<ItemRate[]>([]);
+  const [leads, setLeads] = useState<ItemLead[]>([]);
+  const [measurementSources, setMeasurementSources] = useState<{[key: string]: string}>({});
+  const [materials, setMaterials] = useState<ItemMaterial[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [selectedMeasurement, setSelectedMeasurement] = useState<ItemMeasurement | null>(null);
+  const [showPhotosModal, setShowPhotosModal] = useState(false);
+  const [designPhotos, setDesignPhotos] = useState<any[]>([]);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [rateGroups, setRateGroups] = useState<{[key: string]: {rate: number, quantity: number, description?: string}}>({});
+  const [currentItem, setCurrentItem] = useState<SubworkItem>(item);
+  const [newMeasurement, setNewMeasurement] = useState<Partial<ItemMeasurement>>({
+    no_of_units: 0,
+    length: 0,
+    width_breadth: 0,
+    height_depth: 0,
+    is_manual_quantity: false,
+    selected_rate_id: undefined,
+    estimated_quantity: 0,
+    actual_quantity: 0,
+    variance: 0,
+    variance_reason: ''
+  });
+  const [selectedRate, setSelectedRate] = useState<number>(0);
+  const [enableConversion, setEnableConversion] = useState(false);
+  const [conversionFactor, setConversionFactor] = useState<number>(1);
+  const [convertedUnit, setConvertedUnit] = useState<string>('');
+  const [newLead, setNewLead] = useState<Partial<ItemLead>>({
+    material: '',
+    lead_in_km: 0,
+    lead_charges: 0,
+    initial_lead_charges: 0
+  });
+  const [newMaterial, setNewMaterial] = useState<Partial<ItemMaterial>>({
+    material_name: '',
+    required_quantity: 0,
+    rate_per_unit: 0
+  });
 
-const MeasurementBook = () => {
-  const { user } = useAuth();
-  const { t } = useLanguage();
-  
-  // State management
-  const [works, setWorks] = useState<Work[]>([]);
-  const [selectedWorkId, setSelectedWorkId] = useState<string>('');
-  const [estimateData, setEstimateData] = useState<EstimateData | null>(null);
-  const [measurements, setMeasurements] = useState<MeasurementBookEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedSubworkId, setSelectedSubworkId] = useState<string>('all');
-  const [editingRow, setEditingRow] = useState<number | null>(null);
-  const [newMeasurement, setNewMeasurement] = useState<Partial<MeasurementBookEntry>>({});
-  const [showAddForm, setShowAddForm] = useState(false);
+  // Get the selected rate for calculations
+  const getSelectedRate = () => {
+    if (newMeasurement.selected_rate_id) {
+      const selectedRate = availableRates.find(rate => rate.sr_no === newMeasurement.selected_rate_id);
+      return selectedRate ? selectedRate.rate : item.ssr_rate;
+    }
+    return item.ssr_rate;
+  };
 
-  // Fetch works on component mount
-  useEffect(() => {
-    fetchWorks();
-  }, []);
+  useEffect(() => {
+    if (isOpen && item.sr_no) {
+      // Use existing measurements if provided, otherwise fetch from database
+      if (existingMeasurements.length > 0) {
+        setMeasurements(existingMeasurements);
+      } else {
+        fetchData();
+      }
+      fetchItemRates();
+    }
+  }, [isOpen, item.sr_no, activeTab]);
 
-  // Fetch estimate data when work is selected
-  useEffect(() => {
-    if (selectedWorkId) {
-      fetchEstimateData(selectedWorkId);
-      fetchMeasurements(selectedWorkId);
-    }
-  }, [selectedWorkId]);
+  useEffect(() => {
+    setCurrentItem(item);
+  }, [item]);
 
-  const fetchWorks = async () => {
-    try {
-      setLoading(true);
-      const { data, error } = await supabase
-        .schema('estimate')
-        .from('works')
-        .select('*')
-        .in('status', ['approved', 'in_progress', 'completed', 'draft'])
-        .order('sr_no', { ascending: false });
+  useEffect(() => {
+    calculateRateGroups();
+  }, [measurements, itemRates]);
 
-      if (error) throw error;
-      setWorks(data || []);
-      
-      // Auto-select first work if available
-      if (data && data.length > 0 && !selectedWorkId) {
-        setSelectedWorkId(data[0].works_id);
-      }
-    } catch (error) {
-      console.error('Error fetching works:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetchItemRates = async () => {
+    try {
+      if (!item?.sr_no) {
+        console.error('Item sr_no is required for fetching rates');
+        return;
+      }
 
-  const fetchEstimateData = async (workId: string) => {
-    try {
-      // Fetch work details
-      const { data: work, error: workError } = await supabase
-        .schema('estimate')
-        .from('works')
-        .select('*')
-        .eq('works_id', workId)
-        .single();
+      const { data, error } = await supabase
+        .schema('estimate')
+        .from('item_rates')
+        .select('*')
+        .eq('subwork_item_sr_no', item.sr_no);
 
-      if (workError) throw workError;
+      if (error) throw error;
+      setItemData(item);
 
-      // Fetch subworks
-      const { data: subworks, error: subworksError } = await supabase
-        .schema('estimate')
-        .from('subworks')
-        .select('*')
-        .eq('works_id', workId)
-        .order('sr_no');
+      // Fetch item rates
+      const { data: rates, error: ratesError } = await supabase
+        .schema('estimate')
+        .from('item_rates')
+        .select('*')
+        .eq('subwork_item_sr_no', item.sr_no);
 
-      if (subworksError) throw subworksError;
+      if (ratesError) throw ratesError;
+      setItemRates(rates || []);
+    } catch (error) {
+      console.error('Error fetching item rates:', error);
+    }
+  };
 
-      // Fetch subwork items
-      const subworkItems: { [subworkId: string]: SubworkItem[] } = {};
-      
-      for (const subwork of subworks || []) {
-        const { data: items } = await supabase
-          .schema('estimate')
-          .from('subwork_items')
-          .select('*')
-          .eq('subwork_id', subwork.subworks_id)
-          .order('sr_no');
+  const calculateQuantity = () => {
+    // If manual quantity is enabled, use the manual quantity value
+    if (newMeasurement.is_manual_quantity && newMeasurement.manual_quantity !== undefined) {
+      const finalQuantity = newMeasurement.is_deduction ? -Math.abs(newMeasurement.manual_quantity) : newMeasurement.manual_quantity;
+      return enableConversion ? finalQuantity * conversionFactor : finalQuantity;
+    }
+    
+    // Otherwise calculate from dimensions
+    const quantity = (newMeasurement.no_of_units || 0) * 
+           (newMeasurement.length || 0) * 
+           (newMeasurement.width_breadth || 0) * 
+           (newMeasurement.height_depth || 0);
+    const finalQuantity = newMeasurement.is_deduction ? -Math.abs(quantity) : quantity;
+    return enableConversion ? finalQuantity * conversionFactor : finalQuantity;
+  };
 
-        subworkItems[subwork.subworks_id] = items || [];
-      }
+  const calculateLineAmount = () => {
+    const quantity = calculateQuantity();
+    const amount = quantity * getSelectedRate();
+    return newMeasurement.is_deduction ? -amount : amount;
+    
+    // Use selected rate or default to item's SSR rate
+    let rate = currentItem?.ssr_rate || 0;
+    if (newMeasurement.selected_rate_id && itemRates.length > 0) {
+      const selectedRate = itemRates.find(r => r.sr_no === newMeasurement.selected_rate_id);
+      if (selectedRate) {
+        rate = selectedRate.rate;
+      }
+    }
+  };
 
-      setEstimateData({
-        work,
-        subworks: subworks || [],
-        subworkItems
-      });
+  const calculateRateGroups = () => {
+    const groups: {[key: string]: {rate: number, quantity: number, description?: string}} = {};
+    
+    measurements.forEach(measurement => {
+      const rateId = (measurement.selected_rate_id ?? 0).toString();
+      const selectedRate = itemRates.find(r => r.sr_no.toString() === rateId);
+      const rateValue = selectedRate?.rate || item.ssr_rate || 0;
+      
+      if (!groups[rateId]) {
+        groups[rateId] = {
+          rate: rateValue,
+          quantity: 0,
+          description: selectedRate?.description
+        };
+      }
+      
+      groups[rateId].quantity += measurement.calculated_quantity;
+    });
+    
+    setRateGroups(groups);
+  };
 
-    } catch (error) {
-      console.error('Error fetching estimate data:', error);
-    }
-  };
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      
+      if (activeTab === 'measurements') {
+        const { data, error } = await supabase
+          .schema('estimate')
+          .from('item_measurements')
+          .select('*')
+          .eq('subwork_item_id', currentItem.sr_no)
+          .order('measurement_sr_no', { ascending: true });
 
-  const fetchMeasurements = async (workId: string) => {
-    try {
-      const { data, error } = await supabase
-        .schema('estimate')
-        .from('measurement_book')
-        .select('*')
-        .eq('work_id', workId)
-        .order('sr_no', { ascending: true });
+        if (error) throw error;
+        setMeasurements(data || []);
+      } else if (activeTab === 'leads') {
+        const { data, error } = await supabase
+          .schema('estimate')
+          .from('item_leads')
+          .select('*')
+          .eq('subwork_item_id', currentItem.sr_no)
+          .order('sr_no', { ascending: true });
 
-      if (error) throw error;
-      setMeasurements(data || []);
-    } catch (error) {
-      console.error('Error fetching measurements:', error);
-    }
-  };
+        if (error) throw error;
+        setLeads(data || []);
+      } else if (activeTab === 'materials') {
+        const { data, error } = await supabase
+          .schema('estimate')
+          .from('item_materials')
+          .select('*')
+          .eq('subwork_item_id', currentItem.sr_no)
+          .order('sr_no', { ascending: true });
 
-  const importFromEstimate = async () => {
-    if (!estimateData || !user) return;
+        if (error) throw error;
+        setMaterials(data || []);
+      }
+      
+      if (workId) {
+        // Measurement Book context: merge data from both tables
+        const [originalRes, modifiedRes] = await Promise.all([
+          supabase
+            .schema('estimate')
+            .from('item_measurements')
+            .select('*')
+            .eq('subwork_item_id', item.sr_no)
+            .order('measurement_sr_no'),
+          supabase
+            .schema('estimate')
+            .from('measurement_book')
+            .select('*')
+            .eq('subwork_item_id', item.sr_no)
+            .eq('work_id', workId)
+            .order('measurement_sr_no')
+        ]);
 
-    try {
-      setSaving(true);
-      const importedMeasurements: Partial<MeasurementBookEntry>[] = [];
+        if (originalRes.error) throw originalRes.error;
+        if (modifiedRes.error) throw modifiedRes.error;
 
-      // Import from existing item_measurements
-      for (const subwork of estimateData.subworks) {
-        const items = estimateData.subworkItems[subwork.subworks_id] || [];
-        
-        for (const item of items) {
-          // Fetch existing measurements for this item
-          const { data: existingMeasurements } = await supabase
-            .schema('estimate')
-            .from('item_measurements')
-            .select('*')
-            .eq('subwork_item_id', item.sr_no);
+        // Merge measurements: prioritize measurement_book data
+        const mergedMeasurements = [...(originalRes.data || [])];
+        const sources: {[key: string]: string} = {};
+        
+        // Mark original measurements
+        mergedMeasurements.forEach(measurement => {
+          sources[measurement.measurement_sr_no] = 'item_measurements';
+        });
 
-          if (existingMeasurements && existingMeasurements.length > 0) {
-            // Import existing measurements
-            for (const measurement of existingMeasurements) {
-              importedMeasurements.push({
-                work_id: estimateData.work.works_id,
-                subwork_id: subwork.subworks_id,
-                item_id: item.id,
-                measurement_sr_no: measurement.sr_no,
-                description_of_items: measurement.description_of_items || item.description_of_item,
-                no_of_units: measurement.no_of_units || 1,
-                length: measurement.length || 0,
-                width_breadth: measurement.width_breadth || 0,
-                height_depth: measurement.height_depth || 0,
-                estimated_quantity: measurement.calculated_quantity || 0,
-                actual_quantity: measurement.actual_quantity || measurement.calculated_quantity || 0,
-                unit: measurement.unit || item.ssr_unit,
-                measured_by: user.email || 'System Import'
-              });
-            }
-          } else {
-            // Create default measurement entry for items without measurements
-            importedMeasurements.push({
-              work_id: estimateData.work.works_id,
-              subwork_id: subwork.subworks_id,
-              item_id: item.id,
-              measurement_sr_no: 1,
-              description_of_items: item.description_of_item,
-              no_of_units: item.ssr_quantity || 1,
-              length: 0,
-              width_breadth: 0,
-              height_depth: 0,
-              estimated_quantity: item.ssr_quantity || 0,
-              actual_quantity: 0,
-              unit: item.ssr_unit,
-              measured_by: user.email || 'System Import'
-            });
-          }
-        }
-      }
+        // Replace or add measurements from measurement_book
+        (modifiedRes.data || []).forEach(modifiedMeasurement => {
+          const existingIndex = mergedMeasurements.findIndex(
+            original => original.measurement_sr_no === modifiedMeasurement.measurement_sr_no
+          );
+          
+          if (existingIndex >= 0) {
+            // Replace existing measurement with modified version
+            mergedMeasurements[existingIndex] = modifiedMeasurement;
+          } else {
+            // Add new measurement from measurement_book
+            mergedMeasurements.push(modifiedMeasurement);
+          }
+          sources[modifiedMeasurement.measurement_sr_no] = 'measurement_book';
+        });
 
-      // Insert imported measurements
-      if (importedMeasurements.length > 0) {
-        const { error } = await supabase
-          .schema('estimate')
-          .from('measurement_book')
-          .insert(importedMeasurements);
+        setMeasurements(mergedMeasurements);
+        setMeasurementSources(sources);
+      } else {
+        // Subworks context: only from item_measurements
+        const { data, error } = await supabase
+          .schema('estimate')
+          .from('item_measurements')
+          .eq('item_id', item.sr_no)
+          .eq('subwork_id', subworkId)
+          .order('measurement_sr_no');
 
-        if (error) throw error;
-        
-        alert(`Successfully imported ${importedMeasurements.length} measurement entries!`);
-        fetchMeasurements(selectedWorkId);
-      }
+        if (error) throw error;
+        setMeasurements(data || []);
+        
+        // Mark all as from item_measurements
+        const sources: {[key: string]: string} = {};
+        (data || []).forEach(measurement => {
+          sources[measurement.measurement_sr_no] = 'item_measurements';
+        });
+        setMeasurementSources(sources);
+      }
+    } catch (error: any) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    } catch (error) {
-      console.error('Error importing from estimate:', error);
-      alert('Error importing measurements from estimate');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const getNextMeasurementSrNo = async (): Promise<number> => {
+    try {
+      const { data, error } = await supabase
+        .schema('estimate')
+        .from('item_measurements')
+        .select('measurement_sr_no')
+        .eq('subwork_item_id', currentItem.sr_no)
+        .order('measurement_sr_no', { ascending: false })
+        .limit(1);
 
-  const handleSaveMeasurement = async (measurement: Partial<MeasurementBookEntry>, isNew: boolean = false) => {
-    if (!user) return;
+      if (error) throw error;
+      
+      return data && data.length > 0 ? data[0].measurement_sr_no + 1 : 1;
+    } catch (error) {
+      console.error('Error getting next measurement sr_no:', error);
+      return 1;
+    }
+  };
 
-    try {
-      setSaving(true);
+  const handleAddMeasurement = async () => {
+    if (!user) return;
 
-      if (isNew) {
-        const { error } = await supabase
-          .schema('estimate')
-          .from('measurement_book')
-          .insert([{
-            ...measurement,
-            measured_by: user.email || 'Unknown User'
-          }]);
+    if (selectedRate === 0) {
+      alert('Please select a rate');
+      return;
+    }
 
-        if (error) throw error;
-      } else {
-        const { error } = await supabase
-          .schema('estimate')
-          .from('measurement_book')
-          .update(measurement)
-          .eq('sr_no', measurement.sr_no);
+    try {
+      const nextSrNo = await getNextMeasurementSrNo();
+      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
+                                (newMeasurement.length || 0) * 
+                                (newMeasurement.width_breadth || 0) * 
+                                (newMeasurement.height_depth || 0);
+      
+      // Use the selected rate
+      const rate = selectedRate;
+      const lineAmount = calculatedQuantity * rate;
+      const variance = calculatedQuantity - (newMeasurement.estimated_quantity || 0);
 
-        if (error) throw error;
-      }
+      const measurementData = {
+        ...newMeasurement,
+        subwork_item_id: currentItem.sr_no,
+        measurement_sr_no: nextSrNo,
+        calculated_quantity: calculatedQuantity,
+        actual_quantity: calculatedQuantity,
+        variance: variance,
+        line_amount: lineAmount,
+        unit: enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || null),
+        is_deduction: newMeasurement.is_deduction || false,
+        is_manual_quantity: newMeasurement.is_manual_quantity || false,
+        manual_quantity: newMeasurement.is_manual_quantity ? (newMeasurement.manual_quantity || 0) : null,
+        selected_rate_id: newMeasurement.selected_rate_id || null
+      };
 
-      fetchMeasurements(selectedWorkId);
-      setEditingRow(null);
-      setShowAddForm(false);
-      setNewMeasurement({});
+      // Determine which table to save to based on context
+      if (workId) {
+        // Called from Measurement Book - save to measurement_book table
+        const { error } = await supabase
+          .schema('estimate')
+          .from('measurement_book')
+          .insert([{
+            ...measurementData,
+            work_id: workId,
+          }]);
+        
+        if (error) throw error;
+      } else {
+        // Called from Subworks - save to item_measurements table
+        const { error } = await supabase
+          .schema('estimate')
+          .from('item_measurements')
+          .insert([measurementData]);
+        
+        if (error) throw error;
+      }
+      
+      setShowAddModal(false);
+      setNewMeasurement({
+        no_of_units: 0,
+        length: 0,
+        width_breadth: 0,
+        height_depth: 0,
+        selected_rate_id: undefined,
+        estimated_quantity: 0,
+        actual_quantity: 0,
+        variance: 0,
+        variance_reason: ''
+      });
+      setSelectedRate(0);
+      setEnableConversion(false);
+      setConversionFactor(1);
+      setConvertedUnit('');
+      
+      // Refresh measurements
+      if (existingMeasurements.length > 0) {
+        // If using existing measurements, we need to refresh from parent
+        onClose();
+      } else {
+        fetchData();
+      }
+      
+      // Update SSR quantity after adding measurement
+      setTimeout(async () => {
+        await updateItemSSRQuantity();
+      }, 100);
+    } catch (error) {
+      console.error('Error adding measurement:', error);
+    }
+  };
 
-    } catch (error) {
-      console.error('Error saving measurement:', error);
-      alert('Error saving measurement');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const copyLastMeasurement = () => {
+    if (measurements.length > 0) {
+      const lastMeasurement = measurements[measurements.length - 1];
+      setNewMeasurement({
+        description_of_items: lastMeasurement.description_of_items,
+        no_of_units: lastMeasurement.no_of_units,
+        is_deduction: lastMeasurement.is_deduction || false,
+        length: lastMeasurement.length,
+        width_breadth: lastMeasurement.width_breadth,
+        height_depth: lastMeasurement.height_depth
+      });
+    }
+  };
 
-  const handleDeleteMeasurement = async (srNo: number) => {
-    if (!confirm('Are you sure you want to delete this measurement?')) return;
+  const updateItemSSRQuantity = async () => {
+    try {
+      // Get all measurements for this item
+    // Calculate the new total quantity from measurements
+    const newTotalQuantity = measurements.reduce((total, measurement) => {
+      if (measurement.is_deduction) {
+        return total - Math.abs(measurement.calculated_quantity);
+      } else {
+        return total + measurement.calculated_quantity;
+      }
+    }, 0);
 
-    try {
-      const { error } = await supabase
-        .schema('estimate')
-        .from('measurement_book')
-        .delete()
-        .eq('sr_no', srNo);
+      const totalQuantity = measurements.reduce((sum, measurement) => {
+        if (measurement.is_deduction) {
+          return sum - Math.abs(measurement.calculated_quantity);
+        } else {
+          return sum + measurement.calculated_quantity;
+        }
+      }, 0);
 
-      if (error) throw error;
-      fetchMeasurements(selectedWorkId);
-    } catch (error) {
-      console.error('Error deleting measurement:', error);
-      alert('Error deleting measurement');
-    }
-  };
+      // Calculate new total amount
+      const newTotalAmount = newTotalQuantity * currentItem.ssr_rate;
+      
+      const { error: updateError } = await supabase
+        .schema('estimate')
+        .from('subwork_items')
+        .update({
+          ssr_quantity: totalQuantity,
+          total_item_amount: newTotalAmount
+        })
+        .eq('sr_no', currentItem.sr_no);
 
-  const calculateQuantity = (units: number, length: number, width: number, height: number) => {
-    if (width === 0 && height === 0) {
-      return units; // Count only
-    } else if (height === 0) {
-      return units * length; // Linear
-    } else if (width === 0) {
-      return units * length; // Linear
-    } else {
-      return units * length * width * height; // Volume/Area
-    }
-  };
+      if (updateError) throw updateError;
+      
+      // Update the local current item object to reflect changes
+      setCurrentItem(prev => ({
+        ...prev,
+        ssr_quantity: totalQuantity,
+        total_item_amount: newTotalAmount
+      }));
+      
+      // Notify parent component to refresh the item data
+      if (onItemUpdated) {
+        onItemUpdated(currentItem.sr_no);
+      }
+      
+      console.log(`Updated SSR quantity to ${totalQuantity} for item ${currentItem.sr_no}`);
+      
+    } catch (error) {
+      console.error('Error updating SSR quantity:', error);
+    }
+  };
 
-  const getVarianceStatus = (variance: number) => {
-    if (Math.abs(variance) < 0.01) {
-      return { icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-100' };
-    } else {
-      return { icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-100' };
-    }
-  };
+  const handleEditMeasurement = (measurement: ItemMeasurement) => {
+    setSelectedMeasurement(measurement);
+    setNewMeasurement({
+      description_of_items: measurement.description_of_items,
+      no_of_units: measurement.no_of_units,
+      length: measurement.length,
+      width_breadth: measurement.width_breadth,
+      height_depth: measurement.height_depth,
+      unit: measurement.unit || '',
+      is_deduction: measurement.is_deduction || false,
+      is_manual_quantity: measurement.is_manual_quantity || false,
+      manual_quantity: measurement.manual_quantity || 0,
+      estimated_quantity: measurement.estimated_quantity || 0,
+      actual_quantity: measurement.actual_quantity || 0,
+      variance: measurement.variance || 0,
+      variance_reason: measurement.variance_reason || ''
+    });
+    // Set the selected rate based on the measurement's line_amount and calculated_quantity
+    if (measurement.calculated_quantity && measurement.calculated_quantity > 0) {
+      const rate = (measurement.line_amount || 0) / measurement.calculated_quantity;
+      setSelectedRate(rate);
+    }
+    
+    // Check if conversion was used
+    const originalQuantity = measurement.no_of_units * measurement.length * measurement.width_breadth * measurement.height_depth;
+    if (originalQuantity !== 0 && Math.abs(measurement.calculated_quantity / originalQuantity - 1) > 0.001) {
+      setEnableConversion(true);
+      setConversionFactor(Math.abs(measurement.calculated_quantity) / originalQuantity);
+      setConvertedUnit(measurement.unit || newMeasurement.unit);
+    }
+    
+    setShowEditModal(true);
+  };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('hi-IN', {
-      style: 'currency',
-      currency: 'INR',
-    }).format(amount);
-  };
+  const handleUpdateMeasurement = async () => {
+    if (!selectedMeasurement || !user) return;
 
-  // Filter measurements
-  const filteredMeasurements = measurements.filter(measurement => {
-    const matchesSearch = measurement.description_of_items?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         measurement.item_id.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesSubwork = selectedSubworkId === 'all' || measurement.subwork_id === selectedSubworkId;
-    return matchesSearch && matchesSubwork;
-  });
+    if (selectedRate === 0) {
+      alert('Please select a rate');
+      return;
+    }
 
-  if (loading) {
-    return <LoadingSpinner text="Loading measurement book..." />;
-  }
+    try {
+      const calculatedQuantity = (newMeasurement.no_of_units || 0) * 
+                                (newMeasurement.length || 0) * 
+                                (newMeasurement.width_breadth || 0) * 
+                                (newMeasurement.height_depth || 0);
+      
+      // Use the selected rate
+      const rate = selectedRate;
+      const lineAmount = calculatedQuantity * rate;
+      const variance = calculatedQuantity - (newMeasurement.estimated_quantity || 0);
 
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-700 rounded-3xl shadow-xl hover:shadow-2xl transition-all duration-300 hover:scale-[1.02]">
-        <div className="px-8 py-6">
-          <div className="flex items-center">
-            <div className="p-3 bg-white/20 rounded-2xl mr-4 shadow-lg">
-              <BookOpen className="h-8 w-8 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white drop-shadow-lg">
-                Measurement Book (MB)
-              </h1>
-              <p className="text-violet-100 text-sm mt-1">Record and manage actual measurements for construction works</p>
-            </div>
-          </div>
-        </div>
-      </div>
+      const measurementData = {
+        description_of_items: newMeasurement.description_of_items,
+        unit: enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || currentItem.ssr_unit),
+        no_of_units: newMeasurement.no_of_units,
+        length: newMeasurement.length,
+        width_breadth: newMeasurement.width_breadth,
+        height_depth: newMeasurement.height_depth,
+        calculated_quantity: calculateQuantity(),
+        actual_quantity: calculateQuantity(),
+        variance_reason: newMeasurement.variance_reason,
+        line_amount: calculateLineAmount(),
+        is_manual_quantity: newMeasurement.is_manual_quantity || false,
+        manual_quantity: newMeasurement.manual_quantity || 0,
+      };
 
-      {/* Controls */}
-      <div className="bg-gradient-to-r from-slate-50 to-gray-100 rounded-2xl shadow-lg border border-slate-200 p-6">
-        <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-end">
-          {/* Work Selection */}
-          <div className="flex-1 max-w-md">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Select Work
-            </label>
-            <select
-              value={selectedWorkId}
-              onChange={(e) => setSelectedWorkId(e.target.value)}
-              className="block w-full pl-3 pr-8 py-3 text-sm border border-gray-300 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500 rounded-xl bg-white shadow-lg"
-            >
-              <option value="">Select Work...</option>
-              {works.map((work) => (
-                <option key={work.works_id} value={work.works_id}>
-                  {work.works_id} - {work.work_name}
-                </option>
-              ))}
-            </select>
-          </div>
+      // Determine which table to save to based on context
+      if (workId) {
+        // Called from Measurement Book - save to measurement_book table
+        const { error } = await supabase
+          .schema('estimate')
+          .from('measurement_book')
+          .update(measurementData)
+          .eq('work_id', workId)
+          .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
+          .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
+        
+        if (error) throw error;
+      } else {
+        // Called from Subworks - save to item_measurements table
+        const { error } = await supabase
+          .schema('estimate')
+          .from('item_measurements')
+          .update(measurementData)
+          .eq('subwork_item_id', selectedMeasurement.subwork_item_id)
+          .eq('measurement_sr_no', selectedMeasurement.measurement_sr_no);
+        
+        if (error) throw error;
+      }
 
-          {/* Search */}
-          <div className="flex-1 max-w-md relative">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Search Measurements
-            </label>
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none" style={{top: '28px'}}>
-              <Search className="h-4 w-4 text-gray-400" />
-            </div>
-            <input
-              type="text"
-              placeholder="Search by description or item ID..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="block w-full pl-10 pr-3 py-3 text-sm border border-gray-300 rounded-xl leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-2 focus:ring-violet-500 focus:border-violet-500 shadow-lg"
-            />
-          </div>
+      
+      setShowEditModal(false);
+      setSelectedMeasurement(null);
+      setNewMeasurement({
+        no_of_units: 0,
+        length: 0,
+        width_breadth: 0,
+        height_depth: 0,
+        estimated_quantity: 0,
+        actual_quantity: 0,
+        variance: 0,
+        variance_reason: ''
+      });
+      setSelectedRate(0);
+      setEnableConversion(false);
+      setConversionFactor(1);
+      setConvertedUnit('');
+      
+      // Refresh measurements
+      if (existingMeasurements.length > 0) {
+        // If using existing measurements, we need to refresh from parent
+        onClose();
+      } else {
+        fetchData();
+      }
+      
+      // Update SSR quantity after editing measurement
+      setTimeout(async () => {
+        await updateItemSSRQuantity();
+      }, 100);
+    } catch (error) {
+      console.error('Error updating measurement:', error);
+    }
+  };
 
-          {/* Subwork Filter */}
-          <div className="max-w-xs">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Filter by Subwork
-            </label>
-            <select
-              value={selectedSubworkId}
-              onChange={(e) => setSelectedSubworkId(e.target.value)}
-              className="block w-full pl-3 pr-8 py-3 text-sm border border-gray-300 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500 rounded-xl bg-white shadow-lg"
-            >
-              <option value="all">All Subworks</option>
-              {estimateData?.subworks.map((subwork) => (
-                <option key={subwork.subworks_id} value={subwork.subworks_id}>
-                  {subwork.subworks_name}
-                </option>
-              ))}
-            </select>
-          </div>
+  const handleDeleteMeasurement = async (measurement: ItemMeasurement) => {
+    if (!confirm('Are you sure you want to delete this measurement?')) {
+      return;
+    }
 
-          {/* Action Buttons */}
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={importFromEstimate}
-              disabled={!selectedWorkId || saving}
-              className="inline-flex items-center px-4 py-3 border border-transparent rounded-xl shadow-lg text-sm font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 hover:scale-105 focus:outline-none focus:ring-4 focus:ring-emerald-300 transition-all duration-300 disabled:opacity-50"
-            >
-              <Import className="w-4 h-4 mr-2" />
-              Import from Estimate
-            </button>
-            <button
-              onClick={() => setShowAddForm(true)}
-              disabled={!selectedWorkId}
-              className="inline-flex items-center px-4 py-3 border border-transparent rounded-xl shadow-lg text-sm font-bold text-white bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 hover:scale-105 focus:outline-none focus:ring-4 focus:ring-violet-300 transition-all duration-300 disabled:opacity-50"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Add Measurement
-            </button>
-          </div>
-        </div>
-      </div>
+    try {
+      const { error } = await supabase
+        .schema('estimate')
+        .from('item_measurements')
+        .delete()
+        .eq('subwork_item_id', measurement.subwork_item_id)
+        .eq('measurement_sr_no', measurement.measurement_sr_no);
 
-      {/* Selected Work Info */}
-      {estimateData && (
-        <div className="bg-gradient-to-r from-indigo-50 via-blue-50 to-indigo-100 rounded-2xl border border-indigo-200 p-4 shadow-lg">
-          <div className="flex items-start justify-between">
-            <div>
-              <h3 className="text-base font-semibold text-indigo-900">
-                {estimateData.work.works_id} - {estimateData.work.work_name}
-              </h3>
-              <p className="text-sm text-indigo-700 mt-1">
-                Division: {estimateData.work.division || 'N/A'} | Status: {estimateData.work.status}
-              </p>
-              <div className="flex items-center mt-2 text-sm text-indigo-600">
-                <Calculator className="w-4 h-4 mr-1" />
-                <span>Total Measurements: {filteredMeasurements.length}</span>
-              </div>
-            </div>
-            <div className="text-right">
-              <p className="text-sm text-indigo-700">Total Subworks: {estimateData.subworks.length}</p>
-              <p className="text-sm text-indigo-700">
-                Total Items: {Object.values(estimateData.subworkItems).flat().length}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      if (error) throw error;
+      
+      // Refresh measurements
+      if (existingMeasurements.length > 0) {
+        // If using existing measurements, we need to refresh from parent
+        onClose();
+      } else {
+        fetchData();
+      }
+      
+      // Update SSR quantity after deletion
+      setTimeout(async () => {
+        await updateItemSSRQuantity();
+      }, 100);
+    } catch (error) {
+      console.error('Error deleting measurement:', error);
+    }
+  };
 
-      {/* Measurement Book Table */}
-      {selectedWorkId && (
-        <div className="bg-gradient-to-br from-white to-slate-50 shadow-xl rounded-2xl border border-slate-200 overflow-hidden">
-          <div className="px-6 py-4 bg-gradient-to-r from-violet-500 to-purple-600">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <div className="p-2 bg-white/20 rounded-lg mr-3">
-                  <FileSpreadsheet className="h-5 w-5 text-white" />
-                </div>
-                <h3 className="text-lg font-semibold text-white">Measurement Book Entries</h3>
-              </div>
-              <div className="flex items-center space-x-2">
-                <span className="text-white text-sm">
-                  Showing {filteredMeasurements.length} entries
-                </span>
-                <button
-                  onClick={() => fetchMeasurements(selectedWorkId)}
-                  className="p-2 bg-white/20 rounded-lg hover:bg-white/30 transition-colors"
-                >
-                  <RefreshCw className="h-4 w-4 text-white" />
-                </button>
-              </div>
-            </div>
-          </div>
+  const handleAddLead = async () => {
+    if (!newLead.material || !user) return;
 
-          {filteredMeasurements.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gradient-to-r from-gray-50 to-slate-100">
-                  <tr>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Sr No
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Description
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Units
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Length
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Width
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Height
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Est. Qty
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Actual Qty
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Variance
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Unit
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider border-r border-gray-200">
-                      Measured By
-                    </th>
-                    <th className="px-3 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {filteredMeasurements.map((measurement) => {
-                    const isEditing = editingRow === measurement.sr_no;
-                    const varianceStatus = getVarianceStatus(measurement.variance);
-                    const VarianceIcon = varianceStatus.icon;
+    try {
+      const netLeadCharges = (newLead.lead_charges || 0) - (newLead.initial_lead_charges || 0);
 
-                    return (
-                      <tr key={measurement.sr_no} className="hover:bg-gradient-to-r hover:from-violet-50 hover:to-purple-50 transition-all duration-200">
-                        <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900 border-r border-gray-200">
-                          {measurement.measurement_sr_no}
-                        </td>
-                        <td className="px-3 py-2 text-sm text-gray-900 border-r border-gray-200 max-w-xs">
-                          {isEditing ? (
-                            <textarea
-                              value={measurement.description_of_items}
-                              onChange={(e) => {
-                                const updated = measurements.map(m => 
-                                  m.sr_no === measurement.sr_no 
-                                    ? { ...m, description_of_items: e.target.value }
-                                    : m
-                                );
-                                setMeasurements(updated);
-                              }}
-                              className="w-full p-1 text-xs border border-gray-300 rounded resize-none"
-                              rows={2}
-                            />
-                          ) : (
-                            <div className="text-xs line-clamp-2">{measurement.description_of_items}</div>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-r border-gray-200">
-                          {isEditing ? (
-                            <input
-                              type="number"
-                              value={measurement.no_of_units}
-                              onChange={(e) => {
-                                const updated = measurements.map(m => 
-                                  m.sr_no === measurement.sr_no 
-                                    ? { ...m, no_of_units: parseFloat(e.target.value) || 0 }
-                                    : m
-                                );
-                                setMeasurements(updated);
-                              }}
-                              className="w-16 p-1 text-xs border border-gray-300 rounded text-center"
-                              step="1"
-                            />
-                          ) : (
-                            measurement.no_of_units
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-r border-gray-200">
-                          {isEditing ? (
-                            <input
-                              type="number"
-                              value={measurement.length}
-                              onChange={(e) => {
-                                const updated = measurements.map(m => 
-                                  m.sr_no === measurement.sr_no 
-                                    ? { ...m, length: parseFloat(e.target.value) || 0 }
-                                    : m
-                                );
-                                setMeasurements(updated);
-                              }}
-                              className="w-20 p-1 text-xs border border-gray-300 rounded text-center"
-                              step="0.001"
-                            />
-                          ) : (
-                            measurement.length.toFixed(3)
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-r border-gray-200">
-                          {isEditing ? (
-                            <input
-                              type="number"
-                              value={measurement.width_breadth}
-                              onChange={(e) => {
-                                const updated = measurements.map(m => 
-                                  m.sr_no === measurement.sr_no 
-                                    ? { ...m, width_breadth: parseFloat(e.target.value) || 0 }
-                                    : m
-                                );
-                                setMeasurements(updated);
-                              }}
-                              className="w-20 p-1 text-xs border border-gray-300 rounded text-center"
-                              step="0.001"
-                            />
-                          ) : (
-                            measurement.width_breadth.toFixed(3)
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-r border-gray-200">
-                          {isEditing ? (
-                            <input
-                              type="number"
-                              value={measurement.height_depth}
-                              onChange={(e) => {
-                                const updated = measurements.map(m => 
-                                  m.sr_no === measurement.sr_no 
-                                    ? { ...m, height_depth: parseFloat(e.target.value) || 0 }
-                                    : m
-                                );
-                                setMeasurements(updated);
-                              }}
-                              className="w-20 p-1 text-xs border border-gray-300 rounded text-center"
-                              step="0.001"
-                            />
-                          ) : (
-                            measurement.height_depth.toFixed(3)
-                          )}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-blue-600 border-r border-gray-200">
-                          {measurement.estimated_quantity.toFixed(3)}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-green-600 border-r border-gray-200">
-                          {measurement.actual_quantity.toFixed(3)}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm border-r border-gray-200">
-                          <div className="flex items-center">
-                            <VarianceIcon className={`w-4 h-4 mr-1 ${varianceStatus.color}`} />
-                            <span className={`font-medium ${measurement.variance >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                              {measurement.variance >= 0 ? '+' : ''}{measurement.variance.toFixed(3)}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900 border-r border-gray-200">
-                          {measurement.unit}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-xs text-gray-500 border-r border-gray-200">
-                          {measurement.measured_by}
-                        </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-500">
-                          <div className="flex items-center space-x-1">
-                            {isEditing ? (
-                              <>
-                                <button
-                                  onClick={() => handleSaveMeasurement(measurement)}
-                                  disabled={saving}
-                                  className="text-green-600 hover:text-green-800 p-1 rounded"
-                                  title="Save"
-                                >
-                                  <Save className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setEditingRow(null);
-                                    fetchMeasurements(selectedWorkId);
-                                  }}
-                                  className="text-gray-600 hover:text-gray-800 p-1 rounded"
-                                  title="Cancel"
-                                >
-                                  ✕
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  onClick={() => setEditingRow(measurement.sr_no)}
-                                  className="text-blue-600 hover:text-blue-800 p-1 rounded"
-                                  title="Edit"
-                                >
-                                  <Edit2 className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteMeasurement(measurement.sr_no)}
-                                  className="text-red-600 hover:text-red-800 p-1 rounded"
-                                  title="Delete"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="text-center py-12">
-              <div className="mx-auto w-20 h-20 bg-gradient-to-br from-violet-100 to-purple-200 rounded-2xl flex items-center justify-center mb-4">
-                <BookOpen className="h-10 w-10 text-violet-600" />
-              </div>
-              <h3 className="mt-2 text-sm font-medium text-gray-900">No measurements found</h3>
-              <p className="mt-1 text-sm text-gray-500">
-                {selectedWorkId 
-                  ? 'Import measurements from estimate or add new measurements manually.'
-                  : 'Select a work to view and manage measurements.'
-                }
-              </p>
-              {selectedWorkId && (
-                <div className="mt-6 flex justify-center space-x-3">
-                  <button
-                    onClick={importFromEstimate}
-                    disabled={saving}
-                    className="inline-flex items-center px-4 py-2 border border-transparent shadow-lg text-sm font-semibold rounded-2xl text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 hover:scale-105 focus:outline-none focus:ring-4 focus:ring-emerald-300 transition-all duration-300"
-                  >
-                    <Import className="w-4 h-4 mr-2" />
-                    Import from Estimate
-                  </button>
-                  <button
-                    onClick={() => setShowAddForm(true)}
-                    className="inline-flex items-center px-4 py-2 border border-transparent shadow-lg text-sm font-semibold rounded-2xl text-white bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 hover:scale-105 focus:outline-none focus:ring-4 focus:ring-violet-300 transition-all duration-300"
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Measurement
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+      const { error } = await supabase
+        .schema('estimate')
+        .from('item_leads')
+        .insert([{
+          ...newLead,
+          subwork_item_id: currentItem.sr_no,
+          net_lead_charges: netLeadCharges
+        }]);
 
-      {/* Add Measurement Form Modal */}
-      {showAddForm && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Add New Measurement</h3>
-                <button
-                  onClick={() => {
-                    setShowAddForm(false);
-                    setNewMeasurement({});
-                  }}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <span className="sr-only">Close</span>
-                  ✕
-                </button>
-              </div>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Subwork *
-                  </label>
-                  <select
-                    value={newMeasurement.subwork_id || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, subwork_id: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                  >
-                    <option value="">Select Subwork</option>
-                    {estimateData?.subworks.map((subwork) => (
-                      <option key={subwork.subworks_id} value={subwork.subworks_id}>
-                        {subwork.subworks_name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+      if (error) throw error;
+      
+      setShowAddModal(false);
+      setNewLead({
+        material: '',
+        lead_in_km: 0,
+        lead_charges: 0,
+        initial_lead_charges: 0
+      });
+      fetchData();
+    } catch (error) {
+      console.error('Error adding lead:', error);
+    }
+  };
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Item *
-                  </label>
-                  <select
-                    value={newMeasurement.item_id || ''}
-                    onChange={(e) => {
-                      const selectedItem = Object.values(estimateData?.subworkItems || {})
-                        .flat()
-                        .find(item => item.id === e.target.value);
-                      
-                      setNewMeasurement({
-                        ...newMeasurement, 
-                        item_id: e.target.value,
-                        description_of_items: selectedItem?.description_of_item || '',
-                        unit: selectedItem?.ssr_unit || '',
-                        estimated_quantity: selectedItem?.ssr_quantity || 0
-                      });
-                    }}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    disabled={!newMeasurement.subwork_id}
-                  >
-                    <option value="">Select Item</option>
-                    {newMeasurement.subwork_id && estimateData?.subworkItems[newMeasurement.subwork_id]?.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.description_of_item}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+  const handleAddMaterial = async () => {
+    if (!newMaterial.material_name || !user) return;
 
-                <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Description of Items *
-                  </label>
-                  <textarea
-                    value={newMeasurement.description_of_items || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    rows={2}
-                    placeholder="Enter description of items"
-                  />
-                </div>
+    try {
+      const totalCost = (newMaterial.required_quantity || 0) * (newMaterial.rate_per_unit || 0);
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Number of Units
-                  </label>
-                  <input
-                    type="number"
-                    value={newMeasurement.no_of_units || 1}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 1})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    min="1"
-                  />
-                </div>
+      const { error } = await supabase
+        .schema('estimate')
+        .from('item_materials')
+        .insert([{
+          ...newMaterial,
+          subwork_item_id: currentItem.sr_no,
+          total_material_cost: totalCost
+        }]);
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Length
-                  </label>
-                  <input
-                    type="number"
-                    value={newMeasurement.length || 0}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    step="0.001"
-                  />
-                </div>
+      if (error) throw error;
+      
+      setShowAddModal(false);
+      setNewMaterial({
+        material_name: '',
+        required_quantity: 0,
+        rate_per_unit: 0
+      });
+      fetchData();
+    } catch (error) {
+      console.error('Error adding material:', error);
+    }
+  };
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Width/Breadth
-                  </label>
-                  <input
-                    type="number"
-                    value={newMeasurement.width_breadth || 0}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    step="0.001"
-                  />
-                </div>
+  const getSelectedRateForMeasurement = (measurement: ItemMeasurement): number => {
+    if (measurement.selected_rate_id) {
+      const selectedRate = availableRates.find(rate => rate.sr_no === measurement.selected_rate_id);
+      return selectedRate ? selectedRate.rate : item.ssr_rate;
+    }
+    return item.ssr_rate;
+  };
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Height/Depth
-                  </label>
-                  <input
-                    type="number"
-                    value={newMeasurement.height_depth || 0}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    step="0.001"
-                  />
-                </div>
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('hi-IN', {
+      style: 'currency',
+      currency: 'INR',
+    }).format(amount);
+  };
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Estimated Quantity
-                  </label>
-                  <input
-                    type="number"
-                    value={newMeasurement.estimated_quantity || 0}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, estimated_quantity: parseFloat(e.target.value) || 0})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    step="0.001"
-                  />
-                </div>
+  const totalMeasurementQuantity = measurements.reduce((sum, m) => sum + m.calculated_quantity, 0);
+  const totalMeasurementAmount = measurements.reduce((sum, m) => sum + m.line_amount, 0);
+  const totalLeadCharges = leads.reduce((sum, l) => sum + l.net_lead_charges, 0);
+  const totalMaterialCost = materials.reduce((sum, m) => sum + m.total_material_cost, 0);
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Unit
-                  </label>
-                  <input
-                    type="text"
-                    value={newMeasurement.unit || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    placeholder="Enter unit"
-                  />
-                </div>
+  if (!isOpen) return null;
 
-                <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Variance Reason (if any)
-                  </label>
-                  <textarea
-                    value={newMeasurement.variance_reason || ''}
-                    onChange={(e) => setNewMeasurement({...newMeasurement, variance_reason: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-violet-500 focus:border-violet-500"
-                    rows={2}
-                    placeholder="Enter reason for variance (optional)"
-                  />
-                </div>
+  return (
+    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-60">
+      <div className="relative top-5 mx-auto p-5 border w-11/12 max-w-7xl shadow-lg rounded-md bg-white">
+        <div className="mt-3">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-lg font-medium text-gray-900">
+                Item {item.item_number} - Detailed Analysis
+              </h3>
+              <p className="text-sm text-gray-500">{item.description_of_item}</p>
+            </div>
+            <button
+              onClick={onClose}
+              className="text-gray-400 hover:text-gray-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
-                {/* Calculated Values Display */}
-                <div className="md:col-span-2 bg-gray-50 p-4 rounded-lg">
-                  <h4 className="text-sm font-medium text-gray-700 mb-2">Calculated Values:</h4>
-                  <div className="grid grid-cols-3 gap-4 text-sm">
-                    <div>
-                      <span className="text-gray-600">Actual Quantity:</span>
-                      <span className="ml-2 font-medium text-green-600">
-                        {calculateQuantity(
-                          newMeasurement.no_of_units || 1,
-                          newMeasurement.length || 0,
-                          newMeasurement.width_breadth || 0,
-                          newMeasurement.height_depth || 0
-                        ).toFixed(3)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">Variance:</span>
-                      <span className={`ml-2 font-medium ${
-                        (calculateQuantity(
-                          newMeasurement.no_of_units || 1,
-                          newMeasurement.length || 0,
-                          newMeasurement.width_breadth || 0,
-                          newMeasurement.height_depth || 0
-                        ) - (newMeasurement.estimated_quantity || 0)) >= 0 ? 'text-green-600' : 'text-red-600'
-                      }`}>
-                        {(calculateQuantity(
-                          newMeasurement.no_of_units || 1,
-                          newMeasurement.length || 0,
-                          newMeasurement.width_breadth || 0,
-                          newMeasurement.height_depth || 0
-                        ) - (newMeasurement.estimated_quantity || 0)).toFixed(3)}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">Unit:</span>
-                      <span className="ml-2 font-medium">{newMeasurement.unit || 'N/A'}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+          {/* Item Summary */}
+          <div className="bg-blue-50 rounded-lg border border-blue-200 p-4 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Quantity:</label>
+                {Object.entries(rateGroups).map(([rateKey, group]) => (
+                  <div key={rateKey} className="mb-2">
+                    <p className="text-sm font-semibold text-blue-800">
+                      {group.quantity.toFixed(3)} {item.ssr_unit}
+                    </p>
+                    {group.description && (
+                      <p className="text-xs text-blue-600">({group.description})</p>
+                    )}
+                  </div>
+                ))}
+                <p className="text-xs text-blue-600 mt-1">(Auto-calculated from measurements)</p>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Rate:</label>
+                {Object.entries(rateGroups).map(([rateKey, group]) => (
+                  <div key={rateKey} className="mb-2">
+                    <p className="text-sm font-semibold text-blue-800">
+                      ₹{group.rate.toFixed(2)}
+                    </p>
+                    <p className="text-xs text-blue-600">/{item.ssr_unit}</p>
+                  </div>
+                ))}
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-blue-900 mb-2">SSR Amount:</label>
+                {Object.entries(rateGroups).map(([rateKey, group]) => (
+                  <div key={rateKey} className="mb-2">
+                    <p className="text-sm font-semibold text-green-800">
+                      ₹{(group.quantity * group.rate).toFixed(2)}
+                    </p>
+                    <p className="text-xs text-blue-600">
+                      {group.quantity.toFixed(3)} × ₹{group.rate}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              
+              <div>
+                <span className="text-blue-700 font-medium">Category:</span>
+                <p className="text-blue-900">{currentItem.category || 'N/A'}</p>
+              </div>
+            </div>
+          </div>
 
-              <div className="flex justify-end space-x-3 mt-6">
-                <button
-                  onClick={() => {
-                    setShowAddForm(false);
-                    setNewMeasurement({});
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => handleSaveMeasurement({
-                    ...newMeasurement,
-                    work_id: selectedWorkId,
-                    measurement_sr_no: measurements.length + 1
-                  }, true)}
-                  disabled={!newMeasurement.subwork_id || !newMeasurement.item_id || !newMeasurement.description_of_items || saving}
-                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {saving ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2 inline-block"></div>
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <Save className="w-4 h-4 mr-2 inline-block" />
-                      Add Measurement
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+          {/* Tabs */}
+          <div className="border-b border-gray-200 mb-4">
+            <nav className="-mb-px flex space-x-8">
+              <button
+                onClick={() => setActiveTab('measurements')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'measurements'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <Calculator className="w-4 h-4 inline mr-2" />
+                Measurements ({measurements.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('leads')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'leads'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <Truck className="w-4 h-4 inline mr-2" />
+                Lead Charges ({leads.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('materials')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'materials'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <Package2 className="w-4 h-4 inline mr-2" />
+                Materials ({materials.length})
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          <div className="max-h-96 overflow-y-auto">
+            {/* Measurements Tab */}
+            {activeTab === 'measurements' && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="text-sm text-gray-600">
+                    Total Quantity: {totalMeasurementQuantity.toFixed(3)} {currentItem.ssr_unit} | 
+                    Total Amount: {formatCurrency(totalMeasurementAmount)}
+                  </div>
+                  <button 
+                    onClick={() => setShowAddModal(true)}
+                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-blue-600 hover:bg-blue-700"
+                  >
+                    <Plus className="w-3 h-3 mr-1" />
+                    Add Measurement
+                  </button>
+                </div>
+
+                {loading ? (
+                  <div className="text-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                  </div>
+                ) : measurements.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sr No</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Units</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Length</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Width</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Height</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Quantity
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Variance
+                          </th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Amount
+                          </th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {measurements.map((measurement) => (
+                          <tr key={measurement.sr_no || measurement.measurement_sr_no} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.measurement_sr_no || measurement.sr_no}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.description_of_items || '-'}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.no_of_units}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.length}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.width_breadth}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{measurement.height_depth}</td>
+                            <td className="px-4 py-2 whitespace-nowrap text-sm">
+                              <div className="flex flex-col">
+                                <span className={`font-medium ${measurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
+                                  {measurement.is_deduction ? '-' : ''}{measurement.calculated_quantity.toFixed(3)} {measurement.unit || currentItem.ssr_unit}
+                                </span>
+                                {measurement.is_manual_quantity && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                    Manual
+                                  </span>
+                                )}
+                                {measurement.is_deduction && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800">
+                                    Deduction
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            
+                            <td className="px-4 py-3 text-sm text-center">
+                              <span className={`font-medium ${
+                                (measurement.variance || 0) > 0 ? 'text-red-600' : 
+                                (measurement.variance || 0) < 0 ? 'text-green-600' : 'text-gray-900'
+                              }`}>
+                                {measurement.variance?.toFixed(3) || '0.000'}
+                              </span>
+                            </td>
+                            
+                            <td className="px-4 py-2 whitespace-nowrap text-sm font-medium text-gray-900">
+                              ₹{measurement.line_amount.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap text-right text-sm font-medium">
+                              <div className="flex items-center space-x-2">
+                                <button 
+                                  onClick={() => handleEditMeasurement(measurement)}
+                                  className="text-green-600 hover:text-green-900 p-1 rounded"
+                                  title="Edit Measurement"
+                                >
+                                  <Edit2 className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => handleDeleteMeasurement(measurement)}
+                                  className="text-red-600 hover:text-red-900 p-1 rounded"
+                                  title="Delete Measurement"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <Calculator className="mx-auto h-12 w-12 text-gray-300" />
+                    <h3 className="mt-2 text-sm font-medium text-gray-900">No measurements found</h3>
+                    <p className="mt-1 text-sm text-gray-500">Add detailed measurements for this item.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Lead Charges Tab */}
+            {activeTab === 'leads' && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="text-sm text-gray-600">
+                    Total Lead Charges: {formatCurrency(totalLeadCharges)}
+                  </div>
+                  <button 
+                    onClick={() => setShowAddModal(true)}
+                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-green-600 hover:bg-green-700"
+                  >
+                    <Plus className="w-3 h-3 mr-1" />
+                    Add Lead
+                  </button>
+                </div>
+
+                {loading ? (
+                  <div className="text-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
+                  </div>
+                ) : leads.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Sr No</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Quarry Location</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Lead (km)</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Lead Charges</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Initial Charges</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Net Charges</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {leads.map((lead) => (
+                          <tr key={lead.id} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 text-sm text-gray-900">{lead.sr_no}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{lead.material}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{lead.location_of_quarry || '-'}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{lead.lead_in_km}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">₹{lead.lead_charges.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">₹{lead.initial_lead_charges.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-sm font-medium text-gray-900">
+                              {formatCurrency(lead.net_lead_charges)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <Truck className="mx-auto h-12 w-12 text-gray-300" />
+                    <h3 className="mt-2 text-sm font-medium text-gray-900">No lead charges found</h3>
+                    <p className="mt-1 text-sm text-gray-500">Add lead charges for material transportation.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Materials Tab */}
+            {activeTab === 'materials' && (
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <div className="text-sm text-gray-600">
+                    Total Material Cost: {formatCurrency(totalMaterialCost)}
+                  </div>
+                  <button 
+                    onClick={() => setShowAddModal(true)}
+                    className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded text-white bg-purple-600 hover:bg-purple-700"
+                  >
+                    <Plus className="w-3 h-3 mr-1" />
+                    Add Material
+                  </button>
+                </div>
+
+                {loading ? (
+                  <div className="text-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600 mx-auto"></div>
+                  </div>
+                ) : materials.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Required Qty</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Unit</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Rate per Unit</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Total Cost</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {materials.map((material) => (
+                          <tr key={material.id} className="hover:bg-gray-50">
+                            <td className="px-3 py-2 text-sm text-gray-900">{material.material_name}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{material.required_quantity}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">{material.unit || '-'}</td>
+                            <td className="px-3 py-2 text-sm text-gray-900">₹{material.rate_per_unit.toFixed(2)}</td>
+                            <td className="px-3 py-2 text-sm font-medium text-gray-900">
+                              {formatCurrency(material.total_material_cost)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <Package2 className="mx-auto h-12 w-12 text-gray-300" />
+                    <h3 className="mt-2 text-sm font-medium text-gray-900">No materials found</h3>
+                    <p className="mt-1 text-sm text-gray-500">Add materials required for this item.</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Add Modals */}
+      {showAddModal && activeTab === 'measurements' && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Add Measurement</h3>
+                <div className="flex items-center space-x-2">
+                  {measurements.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={copyLastMeasurement}
+                      className="inline-flex items-center px-3 py-1.5 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                      title="Copy values from the last measurement"
+                    >
+                      <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                      Copy Above
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowAddModal(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <input
+                    type="text"
+                    value={newMeasurement.description_of_items || ''}
+                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter description (optional)"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Unit
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeasurement.unit || ''}
+                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter unit (sqm, cum, nos, etc.)"
+                  />
+                </div>
+
+                {/* Rate Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Select Rate
+                  </label>
+                  <select
+                    value={selectedRate || ''}
+                    onChange={(e) => {
+                      const selectedValue = e.target.value;
+                      if (selectedValue) {
+                        const rate = parseFloat(selectedValue);
+                        setSelectedRate(rate);
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  >
+                    <option value="">Select rate...</option>
+                    {itemRates.map((rate, index) => (
+                      <option key={index} value={rate.rate}>
+                        {rate.description} - ₹{rate.rate.toFixed(2)} per {rate.unit || itemData.ssr_unit}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Dimensions */}
+                <div className="grid grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">No of Units</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={newMeasurement.no_of_units || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Length</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.length || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Width/Breadth</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.width_breadth || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Height/Depth</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.height_depth || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center">
+                    <input
+                      id="edit-manual-quantity"
+                      type="checkbox"
+                      checked={newMeasurement.is_manual_quantity || false}
+                      onChange={(e) => setNewMeasurement({
+                        ...newMeasurement, 
+                        is_manual_quantity: e.target.checked,
+                        manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
+                      })}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="edit-manual-quantity" className="ml-2 block text-sm text-gray-900">
+                      Enter quantity manually (don't calculate from L×B×H)
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 ml-6">
+                    Check this if you want to enter a specific quantity instead of calculating from dimensions
+                  </p>
+
+                  {newMeasurement.is_manual_quantity && (
+                    <div className="ml-6">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Manual Quantity
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={newMeasurement.manual_quantity || ''}
+                        onChange={(e) => setNewMeasurement({
+                          ...newMeasurement, 
+                          manual_quantity: parseFloat(e.target.value) || 0
+                        })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="Enter manual quantity"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Unit Conversion */}
+                <div className="flex items-start space-x-3">
+                  <input
+                    type="checkbox"
+                    id="enableConversion"
+                    checked={enableConversion}
+                    onChange={(e) => setEnableConversion(e.target.checked)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="enableConversion" className="text-sm font-medium text-gray-700">
+                      Convert calculated quantity
+                    </label>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Check this to convert the calculated quantity to different units (e.g., kg to metric ton)
+                    </p>
+                    
+                    {enableConversion && (
+                      <div className="mt-3 grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Conversion Factor
+                          </label>
+                          <input
+                            type="number"
+                            step="0.001"
+                            value={conversionFactor}
+                            onChange={(e) => setConversionFactor(parseFloat(e.target.value) || 1)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="1.0"
+                          />
+                          <p className="text-xs text-gray-400 mt-1">
+                            e.g., 0.001 for kg to metric ton
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Converted Unit
+                          </label>
+                          <input
+                            type="text"
+                            value={convertedUnit}
+                            onChange={(e) => setConvertedUnit(e.target.value)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="metric ton"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center">
+                    <input
+                      id="edit-deduction"
+                      type="checkbox"
+                      checked={newMeasurement.is_deduction || false}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
+                      className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
+                      This is a deduction (subtract from total)
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 ml-6">
+                    Check this for openings, voids, or other items that should be subtracted from the total quantity
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Estimated Quantity
+                  </label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={newMeasurement.estimated_quantity}
+                    onChange={(e) => setNewMeasurement({
+                      ...newMeasurement, 
+                      estimated_quantity: parseFloat(e.target.value) || 0
+                    })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Variance Reason (if any)
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeasurement.variance_reason}
+                    onChange={(e) => setNewMeasurement({
+                      ...newMeasurement, 
+                      variance_reason: e.target.value
+                    })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Reason for variance (optional)"
+                  />
+                </div>
+
+                {/* Preview */}
+                <div className="bg-gray-50 p-4 rounded-md">
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-gray-600">Calculated Quantity:</span>
+                    <span className={`font-medium ${newMeasurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
+                      {newMeasurement.is_deduction ? '-' : ''}{calculateQuantity().toFixed(3)} {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || currentItem.ssr_unit)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-sm mt-2">
+                    <span className="text-gray-600">Line Amount:</span>
+                    <span className={`font-medium ${newMeasurement.is_deduction ? 'text-red-600' : 'text-gray-900'}`}>
+                      {newMeasurement.is_deduction ? '-' : ''}{formatCurrency(Math.abs(calculateLineAmount()))}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs mt-1 text-gray-500">
+                    <span>Rate Used:</span>
+                    <span>₹{getSelectedRate().toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 mt-6">
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddMeasurement}
+                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
+                >
+                  Add Measurement
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Lead Modal */}
+      {showAddModal && activeTab === 'leads' && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Add Lead Charges</h3>
+                <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Material *</label>
+                  <input
+                    type="text"
+                    value={newLead.material || ''}
+                    onChange={(e) => setNewLead({...newLead, material: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
+                    placeholder="Enter material name"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Location of Quarry</label>
+                  <input
+                    type="text"
+                    value={newLead.location_of_quarry || ''}
+                    onChange={(e) => setNewLead({...newLead, location_of_quarry: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
+                    placeholder="Enter quarry location"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Lead (km)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={newLead.lead_in_km || ''}
+                      onChange={(e) => setNewLead({...newLead, lead_in_km: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Lead Charges (₹)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newLead.lead_charges || ''}
+                      onChange={(e) => setNewLead({...newLead, lead_charges: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Initial Charges (₹)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newLead.initial_lead_charges || ''}
+                      onChange={(e) => setNewLead({...newLead, initial_lead_charges: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-green-500 focus:border-green-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-md">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">Net Lead Charges:</span>
+                    <span className="font-medium text-gray-900">
+                      ₹{((newLead.lead_charges || 0) - (newLead.initial_lead_charges || 0)).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 mt-6">
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddLead}
+                  disabled={!newLead.material}
+                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+                >
+                  Add Lead
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Material Modal */}
+      {showAddModal && activeTab === 'materials' && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Add Material</h3>
+                <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Material Name *</label>
+                  <input
+                    type="text"
+                    value={newMaterial.material_name || ''}
+                    onChange={(e) => setNewMaterial({...newMaterial, material_name: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                    placeholder="Enter material name"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Required Quantity</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.001"
+                      value={newMaterial.required_quantity || ''}
+                      onChange={(e) => setNewMaterial({...newMaterial, required_quantity: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
+                    <input
+                      type="text"
+                      value={newMaterial.unit || ''}
+                      onChange={(e) => setNewMaterial({...newMaterial, unit: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                      placeholder="e.g., kg, ton, nos"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Rate per Unit (₹)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMaterial.rate_per_unit || ''}
+                      onChange={(e) => setNewMaterial({...newMaterial, rate_per_unit: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-md">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">Total Material Cost:</span>
+                    <span className="font-medium text-gray-900">
+                      ₹{((newMaterial.required_quantity || 0) * (newMaterial.rate_per_unit || 0)).toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 mt-6">
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddMaterial}
+                  disabled={!newMaterial.material_name}
+                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50"
+                >
+                  Add Material
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Measurement Modal */}
+      {showEditModal && selectedMeasurement && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-70">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-2xl shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Edit Measurement</h3>
+                <button onClick={() => setShowEditModal(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Description
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeasurement.description_of_items || ''}
+                    onChange={(e) => setNewMeasurement({...newMeasurement, description_of_items: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter description (optional)"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Unit
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeasurement.unit || ''}
+                    onChange={(e) => setNewMeasurement({...newMeasurement, unit: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter unit (e.g., sqm, cum, nos)"
+                  />
+                </div>
+
+                {/* Rate Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Select Rate *
+                  </label>
+                  <select
+                    value={selectedRate || ''}
+                    onChange={(e) => {
+                      const selectedValue = e.target.value;
+                      if (selectedValue) {
+                        const rate = parseFloat(selectedValue);
+                        setSelectedRate(rate);
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  >
+                    <option value="">Select rate...</option>
+                    {itemRates.map((rate, index) => (
+                      <option key={index} value={rate.rate}>
+                        {rate.description} - ₹{rate.rate.toFixed(2)} per {rate.unit || itemData.ssr_unit}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Dimensions */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">No of Units</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={newMeasurement.no_of_units || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, no_of_units: parseInt(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Length</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.length || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, length: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Width/Breadth</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.width_breadth || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, width_breadth: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Height/Depth</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newMeasurement.height_depth || ''}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, height_depth: parseFloat(e.target.value) || 0})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center">
+                    <input
+                      id="edit-manual-quantity"
+                      type="checkbox"
+                      checked={newMeasurement.is_manual_quantity || false}
+                      onChange={(e) => setNewMeasurement({
+                        ...newMeasurement, 
+                        is_manual_quantity: e.target.checked,
+                        manual_quantity: e.target.checked ? (newMeasurement.manual_quantity || 0) : 0
+                      })}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="edit-manual-quantity" className="ml-2 block text-sm text-gray-900">
+                      Enter quantity manually (don't calculate from L×B×H)
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 ml-6">
+                    Check this if you want to enter a specific quantity instead of calculating from dimensions
+                  </p>
+
+                  {newMeasurement.is_manual_quantity && (
+                    <div className="ml-6">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Manual Quantity
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={newMeasurement.manual_quantity || ''}
+                        onChange={(e) => setNewMeasurement({
+                          ...newMeasurement, 
+                          manual_quantity: parseFloat(e.target.value) || 0
+                        })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="Enter manual quantity"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Unit Conversion */}
+                <div className="flex items-start space-x-3">
+                  <input
+                    type="checkbox"
+                    id="enableConversion"
+                    checked={enableConversion}
+                    onChange={(e) => setEnableConversion(e.target.checked)}
+                    className="mt-1"
+                  />
+                  <div className="flex-1">
+                    <label htmlFor="enableConversion" className="text-sm font-medium text-gray-700">
+                      Convert calculated quantity
+                    </label>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Check this to convert the calculated quantity to different units (e.g., kg to metric ton)
+                    </p>
+                    
+                    {enableConversion && (
+                      <div className="mt-3 grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Conversion Factor
+                          </label>
+                          <input
+                            type="number"
+                            step="0.001"
+                            value={conversionFactor}
+                            onChange={(e) => setConversionFactor(parseFloat(e.target.value) || 1)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="1.0"
+                          />
+                          <p className="text-xs text-gray-400 mt-1">
+                            e.g., 0.001 for kg to metric ton
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Converted Unit
+                          </label>
+                          <input
+                            type="text"
+                            value={convertedUnit}
+                            onChange={(e) => setConvertedUnit(e.target.value)}
+                            className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                            placeholder="metric ton"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center">
+                    <input
+                      id="edit-deduction"
+                      type="checkbox"
+                      checked={newMeasurement.is_deduction || false}
+                      onChange={(e) => setNewMeasurement({...newMeasurement, is_deduction: e.target.checked})}
+                      className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                    />
+                    <label htmlFor="edit-deduction" className="ml-2 block text-sm text-gray-900 text-red-700">
+                      This is a deduction (subtract from total)
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 ml-6">
+                    Check this for openings, voids, or other items that should be subtracted from the total quantity
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Estimated Quantity
+                  </label>
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={newMeasurement.estimated_quantity}
+                    onChange={(e) => setNewMeasurement({
+                      ...newMeasurement, 
+                      estimated_quantity: parseFloat(e.target.value) || 0
+                    })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Variance Reason (if any)
+                  </label>
+                  <input
+                    type="text"
+                    value={newMeasurement.variance_reason}
+                    onChange={(e) => setNewMeasurement({
+                      ...newMeasurement, 
+                      variance_reason: e.target.value
+                    })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Reason for variance (optional)"
+                  />
+                </div>
+
+                <div className="bg-gray-50 p-3 rounded-md">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">Calculated Quantity:</span>
+                    <span className="font-medium text-gray-900">
+                      {calculateQuantity().toFixed(3)} {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || item.ssr_unit)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">Line Amount:</span>
+                    <span className="font-medium text-gray-900">
+                      ₹{(calculateQuantity() * getSelectedRate()).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-gray-500">
+                    <span>Rate Used:</span>
+                    <span>
+                      ₹{getSelectedRate().toFixed(2)} per {enableConversion && convertedUnit ? convertedUnit : (newMeasurement.unit || item.ssr_unit)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-3 mt-6">
+                <button
+                  onClick={() => setShowEditModal(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleUpdateMeasurement}
+                  className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
+                >
+                  Update Measurement
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Design Photos Modal */}
+      {showPhotosModal && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-10 mx-auto p-5 border w-11/12 max-w-4xl shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Design Photos</h3>
+                <button
+                  onClick={() => {
+                    setShowPhotosModal(false);
+                    setPhotoError('');
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {photoError && (
+                <div className="mb-4 bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-md text-sm">
+                  {photoError}
+                </div>
+              )}
+
+              {/* Upload Section */}
+              <div className="mb-6 p-4 border-2 border-dashed border-gray-300 rounded-lg">
+                <div className="text-center">
+                  <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                  <div className="mt-4">
+                    <label htmlFor="photo-upload" className="cursor-pointer">
+                      <span className="mt-2 block text-sm font-medium text-gray-900">
+                        Upload Design Photos
+                      </span>
+                      <span className="mt-1 block text-xs text-gray-500">
+                        PNG, JPG, GIF up to 5MB each. Maximum 5 photos.
+                      </span>
+                    </label>
+                    <input
+                      id="photo-upload"
+                      type="file"
+                      multiple
+                      accept="image/*"
+                      onChange={handlePhotoUpload}
+                      disabled={uploadingPhoto || designPhotos.length >= 5}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => document.getElementById('photo-upload')?.click()}
+                      disabled={uploadingPhoto || designPhotos.length >= 5}
+                      className="mt-3 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {uploadingPhoto ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Uploading...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-4 h-4 mr-2" />
+                          Choose Photos
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
-export default MeasurementBook;
+export default ItemMeasurements;
