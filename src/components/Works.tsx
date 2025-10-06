@@ -350,7 +350,7 @@ const Works: React.FC = () => {
                     Cost Without Tax
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                    Cost With Tax
+                    Total Estimate With Tax
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-white uppercase tracking-wider">
                     Created
