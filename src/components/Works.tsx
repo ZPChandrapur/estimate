@@ -347,7 +347,7 @@ const Works: React.FC = () => {
                     Status
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-white uppercase tracking-wider">
-                    Cost Without Tax
+                    Total Estimate Without Tax
                   </th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-white uppercase tracking-wider">
                     Total Estimate With Tax
