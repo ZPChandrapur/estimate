@@ -47,6 +47,16 @@ interface SubworkComparison {
   percentageVariance: number;
   status: 'over' | 'under' | 'equal';
   measurementDetails?: MeasurementDetail[];
+  changedItems?: ChangedItemDetail[];
+}
+
+interface ChangedItemDetail {
+  itemId: number;
+  description: string;
+  originalEstimate: number;
+  revisedAmount: number;
+  change: number;
+  percentageChange: number;
 }
 
 interface MeasurementDetail {
@@ -142,9 +152,13 @@ const Compare: React.FC = () => {
     }
   };
 
-  const fetchMeasurementData = async (worksId: string): Promise<{ totalAmount: number; subworkAmounts: { [subworkId: string]: number } } | null> => {
+  const fetchMeasurementData = async (worksId: string): Promise<{
+    totalAmount: number;
+    subworkAmounts: { [subworkId: string]: number };
+    changedItemsBySubwork: { [subworkId: string]: ChangedItemDetail[] };
+  } | null> => {
     try {
-      // Fetch all subwork items for this work
+      // Fetch all subworks for this work
       const { data: subworks, error: subworksError } = await supabase
         .schema('estimate')
         .from('subworks')
@@ -159,46 +173,91 @@ const Compare: React.FC = () => {
       const subworkIds = (subworks || []).map(s => s.subworks_id);
 
       if (subworkIds.length === 0) {
-        return { totalAmount: 0, subworkAmounts: {} };
+        return { totalAmount: 0, subworkAmounts: {}, changedItemsBySubwork: {} };
       }
 
-      // Fetch all measurements through subwork_items
-      const { data: measurements, error } = await supabase
+      // Fetch all subwork items with their estimated amounts
+      const { data: allItems, error: itemsError } = await supabase
         .schema('estimate')
-        .from('item_measurements')
-        .select(`
-          line_amount,
-          subwork_items!inner (
-            subwork_id
-          )
-        `);
+        .from('subwork_items')
+        .select('sr_no, subwork_id, description_of_item, total_item_amount')
+        .in('subwork_id', subworkIds);
 
-      if (error) {
-        console.error('Error fetching measurement data:', error);
+      if (itemsError) {
+        console.error('Error fetching subwork items:', itemsError);
         return null;
       }
 
-      // Filter and group measurements by subwork
+      // Fetch all measurements for these subwork items
+      const itemIds = (allItems || []).map(item => item.sr_no);
+
+      const { data: measurements, error: measurementsError } = await supabase
+        .schema('estimate')
+        .from('item_measurements')
+        .select('subwork_item_id, line_amount')
+        .in('subwork_item_id', itemIds);
+
+      if (measurementsError) {
+        console.error('Error fetching measurements:', measurementsError);
+        return null;
+      }
+
+      // Create a map of measured amounts by item
+      const measuredAmountsByItem = new Map<number, number>();
+      (measurements || []).forEach((m: any) => {
+        const itemId = m.subwork_item_id;
+        const currentAmount = measuredAmountsByItem.get(itemId) || 0;
+        measuredAmountsByItem.set(itemId, currentAmount + (Number(m.line_amount) || 0));
+      });
+
+      // Calculate revised amounts and track changes
       const subworkAmounts: { [subworkId: string]: number } = {};
+      const changedItemsBySubwork: { [subworkId: string]: ChangedItemDetail[] } = {};
       let totalAmount = 0;
 
-      (measurements || []).forEach((measurement: any) => {
-        const subworkId = measurement.subwork_items?.subwork_id;
+      (allItems || []).forEach(item => {
+        const subworkId = item.subwork_id;
+        const originalEstimate = Number(item.total_item_amount) || 0;
 
-        if (subworkId && subworkIds.includes(subworkId)) {
-          const amount = Number(measurement.line_amount) || 0;
+        // Check if this item has measurements
+        const hasMeasurements = measuredAmountsByItem.has(item.sr_no);
+        const revisedAmount = hasMeasurements
+          ? measuredAmountsByItem.get(item.sr_no)!
+          : originalEstimate;
 
-          if (!subworkAmounts[subworkId]) {
-            subworkAmounts[subworkId] = 0;
+        // Track changed items
+        if (hasMeasurements && Math.abs(revisedAmount - originalEstimate) > 0.01) {
+          if (!changedItemsBySubwork[subworkId]) {
+            changedItemsBySubwork[subworkId] = [];
           }
-          subworkAmounts[subworkId] += amount;
-          totalAmount += amount;
+
+          const change = revisedAmount - originalEstimate;
+          const percentageChange = originalEstimate > 0
+            ? (change / originalEstimate) * 100
+            : 0;
+
+          changedItemsBySubwork[subworkId].push({
+            itemId: item.sr_no,
+            description: item.description_of_item,
+            originalEstimate,
+            revisedAmount,
+            change,
+            percentageChange
+          });
         }
+
+        // Calculate totals
+        if (!subworkAmounts[subworkId]) {
+          subworkAmounts[subworkId] = 0;
+        }
+        subworkAmounts[subworkId] += revisedAmount;
+        totalAmount += revisedAmount;
       });
 
       return {
         totalAmount,
-        subworkAmounts
+        subworkAmounts,
+        changedItemsBySubwork
       };
     } catch (error) {
       console.error('Error fetching measurement data:', error);
@@ -307,6 +366,10 @@ const Compare: React.FC = () => {
           if (subworkMeasurementAmount > 0) {
             measurementDetails = await fetchDetailedMeasurementData(subwork.subworks_id);
           }
+
+          // Get changed items for this subwork
+          const changedItems = measurementData?.changedItemsBySubwork[subwork.subworks_id] || [];
+
           subworkDetails.push({
             subworkId: subwork.subworks_id,
             subworkName: subwork.subworks_name,
@@ -315,7 +378,8 @@ const Compare: React.FC = () => {
             difference: subworkDifference,
             percentageVariance: subworkPercentageVariance,
             status: subworkStatus,
-            measurementDetails
+            measurementDetails,
+            changedItems
           });
         }
 
@@ -576,14 +640,46 @@ const Compare: React.FC = () => {
                       
                       <div className="grid grid-cols-2 gap-4 text-xs">
                         <div>
-                          <p className="text-gray-500">Estimate</p>
+                          <p className="text-gray-500">Original</p>
                           <p className="font-bold text-blue-600">{formatCurrency(subwork.estimateAmount)}</p>
                         </div>
                         <div>
-                          <p className="text-gray-500">Measurement</p>
+                          <p className="text-gray-500">Revised</p>
                           <p className="font-bold text-purple-600">{formatCurrency(subwork.measurementAmount)}</p>
                         </div>
                       </div>
+
+                      {/* Show changed items if any */}
+                      {subwork.changedItems && subwork.changedItems.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-gray-200">
+                          <p className="text-xs font-semibold text-gray-700 mb-2">
+                            {subwork.changedItems.length} Item{subwork.changedItems.length > 1 ? 's' : ''} Changed
+                          </p>
+                          <div className="space-y-2">
+                            {subwork.changedItems.map((item) => (
+                              <div key={item.itemId} className="bg-white rounded-lg p-2 text-xs">
+                                <p className="text-gray-700 font-medium line-clamp-1 mb-1">{item.description}</p>
+                                <div className="grid grid-cols-3 gap-2">
+                                  <div>
+                                    <p className="text-gray-400">Original</p>
+                                    <p className="font-semibold text-gray-700">{formatCurrency(item.originalEstimate)}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-400">Revised</p>
+                                    <p className="font-semibold text-gray-700">{formatCurrency(item.revisedAmount)}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-400">Change</p>
+                                    <p className={`font-semibold ${item.change > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                      {item.change > 0 ? '+' : ''}{formatCurrency(item.change)}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       
                       <div className="mt-3 pt-3 border-t border-gray-200">
                         <div className="flex items-center justify-between">
