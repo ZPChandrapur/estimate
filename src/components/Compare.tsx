@@ -144,50 +144,56 @@ const Compare: React.FC = () => {
 
   const fetchMeasurementData = async (worksId: string): Promise<{ totalAmount: number; subworkAmounts: { [subworkId: string]: number } } | null> => {
     try {
-      // Hardcoded measurement book total for demo purposes
-      if (worksId === '2025-TS-114') {
-        return {
-          totalAmount: 470000, // ₹4,70,000
-          subworkAmounts: {
-            '2025-TS-114-1': 470000
-          }
-        };
+      // Fetch all subwork items for this work
+      const { data: subworks, error: subworksError } = await supabase
+        .schema('estimate')
+        .from('subworks')
+        .select('subworks_id')
+        .eq('works_id', worksId);
+
+      if (subworksError) {
+        console.error('Error fetching subworks:', subworksError);
+        return null;
       }
-      
-      // Fetch all measurements for this works ID with subwork details
-      const { data: measurementsWithSubworks, error } = await supabase
+
+      const subworkIds = (subworks || []).map(s => s.subworks_id);
+
+      if (subworkIds.length === 0) {
+        return { totalAmount: 0, subworkAmounts: {} };
+      }
+
+      // Fetch all measurements through subwork_items
+      const { data: measurements, error } = await supabase
         .schema('estimate')
         .from('item_measurements')
         .select(`
-          *,
+          line_amount,
           subwork_items!inner (
-            sr_no,
-            description_of_item,
-            subworks!inner (
-              works_id
-            )
+            subwork_id
           )
-        `)
-        .eq('work_id', worksId);
+        `);
 
       if (error) {
         console.error('Error fetching measurement data:', error);
         return null;
       }
 
-      // Group measurements by subwork
+      // Filter and group measurements by subwork
       const subworkAmounts: { [subworkId: string]: number } = {};
       let totalAmount = 0;
 
-      (measurementsWithSubworks || []).forEach(measurement => {
-        const subworkId = measurement.subwork_id;
-        const amount = measurement.actual_quantity || 0;
-        
-        if (!subworkAmounts[subworkId]) {
-          subworkAmounts[subworkId] = 0;
+      (measurements || []).forEach((measurement: any) => {
+        const subworkId = measurement.subwork_items?.subwork_id;
+
+        if (subworkId && subworkIds.includes(subworkId)) {
+          const amount = Number(measurement.line_amount) || 0;
+
+          if (!subworkAmounts[subworkId]) {
+            subworkAmounts[subworkId] = 0;
+          }
+          subworkAmounts[subworkId] += amount;
+          totalAmount += amount;
         }
-        subworkAmounts[subworkId] += amount;
-        totalAmount += amount;
       });
 
       return {
@@ -202,30 +208,49 @@ const Compare: React.FC = () => {
 
   const fetchDetailedMeasurementData = async (subworkId: string): Promise<MeasurementDetail[]> => {
     try {
+      // Get subwork items for this subwork
+      const { data: subworkItems, error: itemsError } = await supabase
+        .schema('estimate')
+        .from('subwork_items')
+        .select('sr_no, description_of_item')
+        .eq('subwork_id', subworkId);
+
+      if (itemsError) {
+        console.error('Error fetching subwork items:', itemsError);
+        return [];
+      }
+
+      const itemIds = (subworkItems || []).map(item => item.sr_no);
+
+      if (itemIds.length === 0) {
+        return [];
+      }
+
+      // Fetch measurements for these items
       const { data: measurements, error } = await supabase
         .schema('estimate')
         .from('item_measurements')
-        .select(`
-          *,
-          subwork_items!inner (
-            description_of_item
-          )
-        `)
-        .eq('subwork_id', subworkId);
+        .select('*')
+        .in('subwork_item_id', itemIds);
 
       if (error) {
         console.error('Error fetching detailed measurement data:', error);
         return [];
       }
 
-      return (measurements || []).map(measurement => ({
+      // Create a map of item descriptions
+      const itemDescMap = new Map(
+        (subworkItems || []).map(item => [item.sr_no, item.description_of_item])
+      );
+
+      return (measurements || []).map((measurement: any) => ({
         id: measurement.sr_no.toString(),
-        description: measurement.description_of_items || 'N/A',
-        quantity: measurement.actual_quantity || 0,
-        unit: measurement.unit || 'N/A',
-        rate: 0, // Rate would need to be calculated or fetched separately
-        amount: measurement.actual_quantity || 0,
-        itemDescription: 'N/A' // This would need to be joined separately
+        description: measurement.description_of_items || '',
+        quantity: Number(measurement.calculated_quantity) || 0,
+        unit: measurement.unit || '',
+        rate: Number(measurement.line_amount) / (Number(measurement.calculated_quantity) || 1),
+        amount: Number(measurement.line_amount) || 0,
+        itemDescription: itemDescMap.get(measurement.subwork_item_id) || ''
       }));
     } catch (error) {
       console.error('Error fetching detailed measurement data:', error);
